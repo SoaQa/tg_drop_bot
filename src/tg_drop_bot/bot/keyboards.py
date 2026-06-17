@@ -9,6 +9,7 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from tg_drop_bot.db.models import Giveaway, KnownGroup
+from tg_drop_bot.services.rendering import giveaway_status_label
 
 
 def admin_main_keyboard() -> ReplyKeyboardMarkup:
@@ -59,7 +60,7 @@ def draft_preview_keyboard(giveaway_id: int) -> InlineKeyboardMarkup:
 def giveaway_list_keyboard(giveaways: list[Giveaway]) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for giveaway in giveaways:
-        label = f"#{giveaway.id} - {giveaway.status}"
+        label = f"#{giveaway.id} - {giveaway_status_label(giveaway.status)}"
         builder.button(text=label, callback_data=f"giveaway:view:{giveaway.id}")
     builder.adjust(1)
     return builder.as_markup()

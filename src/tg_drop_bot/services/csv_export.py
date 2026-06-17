@@ -4,6 +4,7 @@ import csv
 from io import StringIO
 
 from tg_drop_bot.db.models import Participant
+from tg_drop_bot.services.rendering import membership_status_label
 
 
 def participants_to_csv(participants: list[Participant]) -> bytes:
@@ -11,14 +12,14 @@ def participants_to_csv(participants: list[Participant]) -> bytes:
     writer = csv.writer(buffer)
     writer.writerow(
         [
-            "telegram_user_id",
-            "username",
-            "first_name",
-            "last_name",
-            "joined_at",
-            "captcha_passed_at",
-            "membership_status",
-            "membership_checked_at",
+            "telegram_id",
+            "имя_пользователя",
+            "имя",
+            "фамилия",
+            "время_участия",
+            "капча_пройдена",
+            "статус_членства",
+            "членство_проверено",
         ]
     )
     for participant in participants:
@@ -30,7 +31,7 @@ def participants_to_csv(participants: list[Participant]) -> bytes:
                 participant.last_name or "",
                 participant.joined_at.isoformat(),
                 participant.captcha_passed_at.isoformat(),
-                participant.membership_status,
+                membership_status_label(participant.membership_status),
                 participant.membership_checked_at.isoformat()
                 if participant.membership_checked_at
                 else "",

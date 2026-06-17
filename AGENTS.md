@@ -1,52 +1,61 @@
-# Agent Development Rules
+# Правила разработки для агентов
 
-These rules apply to the whole repository.
+Эти правила действуют для всего репозитория.
 
-## Core Workflow
+## Язык
 
-- Read the existing code and docs before changing behavior.
-- Keep changes scoped to the user request; do not mix unrelated refactors with feature work.
-- Do not commit secrets, real bot tokens, production `.env` files, database dumps, or local caches.
-- Prefer the existing stack and patterns: `aiogram 3`, async SQLAlchemy, Alembic, `uv`, Docker Compose, GitHub Actions.
-- Use `uv` for dependency and command execution. Keep `uv.lock` in sync with `pyproject.toml`.
+- По умолчанию общайся с владельцем проекта на русском языке.
+- Весь текст, который видят пользователи, участники, админы или операторы бота, должен быть на русском.
+- Это касается сообщений Telegram-бота, кнопок, CSV-выгрузок, README, `.env.example` комментариев и production-инструкций.
+- Английский допустим для внутренних идентификаторов, имен переменных, enum-значений, callback data, названий пакетов, логов и технических API-контрактов.
+- Если добавляешь новое user-facing поле или статус, сразу добавляй русскую человекочитаемую подпись.
 
-## Versioning
+## Рабочий процесс
 
-- The project version lives in both `pyproject.toml` and `src/tg_drop_bot/__init__.py`; keep them identical.
-- Update the version whenever business logic changes.
-- Use semantic versioning:
-  - Patch: bug fixes, internal cleanups, docs/process changes, tests, CI tweaks, or non-behavioral Docker changes.
-  - Minor: new bot/admin/user behavior, changed giveaway rules, changed captcha/rate-limit behavior, new config that affects runtime behavior, or database schema additions compatible with existing deployments.
-  - Major: breaking config changes, incompatible database migrations, changed deployment contract, removed behavior, or changes that require manual production intervention.
-- Release tags must match the project version exactly, for example version `0.2.0` must be released as tag `v0.2.0`.
-- Do not create a release tag for documentation-only changes unless the user explicitly asks.
+- Перед изменениями прочитай существующий код и документацию.
+- Держи изменения в рамках запроса пользователя; не смешивай фичи, багфиксы и unrelated refactor.
+- Не коммить секреты, реальные bot tokens, production `.env`, дампы БД и локальные кэши.
+- Используй текущий стек и паттерны проекта: `aiogram 3`, async SQLAlchemy, Alembic, `uv`, Docker Compose, GitHub Actions.
+- Для зависимостей и команд используй `uv`. Если меняешь `pyproject.toml`, обновляй `uv.lock`.
 
-## Business Logic
+## Версионирование
 
-- Treat these areas as business logic:
-  - admin panel flows;
-  - giveaway lifecycle and statuses;
-  - participant registration;
-  - captcha rules;
-  - membership checks;
-  - winner selection;
-  - CSV export contents;
-  - scheduler behavior;
-  - rate limiting/debounce behavior.
-- Any business logic change must include or update tests.
-- Keep Telegram-specific code thin where possible; put testable behavior in `services`.
+- Версия проекта хранится в `pyproject.toml` и `src/tg_drop_bot/__init__.py`; значения должны совпадать.
+- Обновляй версию при любом изменении бизнес-логики или user-facing поведения.
+- Используй semantic versioning:
+  - Patch: багфиксы, внутренние чистки, документация, правила процесса, тесты, CI, не поведенческие Docker-правки.
+  - Minor: новое поведение бота/админки/участников, изменение правил розыгрыша, captcha/rate-limit поведения, новые runtime-настройки, совместимые добавления в БД, изменения user-facing текстов.
+  - Major: breaking config changes, несовместимые миграции, изменение deploy-контракта, удаление поведения или изменения с ручным production-вмешательством.
+- Release tag должен точно соответствовать версии проекта: версия `0.2.0` выпускается тегом `v0.2.0`.
+- Не создавай release tag для документации или process-only изменений, если пользователь явно не попросил.
 
-## Database And Migrations
+## Бизнес-логика
 
-- Every persistent schema change must include an Alembic migration.
-- Do not edit already-released migrations unless the change has not been pushed or released.
-- Prefer additive migrations for production safety.
-- Keep model definitions and migrations consistent.
-- Run `alembic upgrade head` against PostgreSQL before releasing schema changes.
+- Считай бизнес-логикой:
+  - сценарии админки;
+  - жизненный цикл и статусы розыгрыша;
+  - регистрацию участников;
+  - правила капчи;
+  - проверки членства;
+  - выбор победителей;
+  - содержимое CSV;
+  - scheduler;
+  - rate limiting/debounce;
+  - все user-facing тексты и подписи.
+- Любое изменение бизнес-логики должно включать новые или обновленные тесты.
+- Telegram-specific код держи тонким, а тестируемую логику выноси в `services`.
 
-## Required Checks
+## База данных и миграции
 
-Before committing code changes, run:
+- Любое изменение persistent schema должно сопровождаться Alembic migration.
+- Не редактируй уже выпущенные миграции, если изменение было запушено или выпущено релизом.
+- Для production-безопасности предпочитай additive migrations.
+- Держи модели SQLAlchemy и миграции синхронными.
+- Перед релизом schema changes запускай `alembic upgrade head` на PostgreSQL.
+
+## Обязательные проверки
+
+Перед коммитом code changes запускай:
 
 ```powershell
 uv run ruff check .
@@ -54,14 +63,14 @@ uv run mypy src tests
 uv run pytest
 ```
 
-For database or deploy changes, also run:
+Для изменений БД или deploy также запускай:
 
 ```powershell
 uv run alembic upgrade head
 docker build -t tg-drop-bot:local .
 ```
 
-For integration tests with PostgreSQL:
+Для integration tests с PostgreSQL:
 
 ```powershell
 docker compose up -d postgres redis
@@ -69,16 +78,16 @@ $env:TEST_DATABASE_URL='postgresql+asyncpg://tg_drop_bot:tg_drop_bot@localhost:5
 uv run pytest
 ```
 
-## Docker And Deploy
+## Docker и deploy
 
-- Local Compose is for dependencies and optional local bot execution.
-- Production Compose must use the published GHCR image by default.
-- Watchtower must only auto-update the bot service, not PostgreSQL.
-- Do not change the production deploy contract without updating `README.md` and `.env.example`.
+- Local Compose используется для зависимостей и опционального локального запуска бота.
+- Production Compose по умолчанию должен использовать опубликованный GHCR image.
+- Watchtower должен автообновлять только bot service, не PostgreSQL.
+- Если меняешь production deploy contract, обновляй `README.md` и `.env.example`.
 
-## GitHub Actions And Releases
+## GitHub Actions и релизы
 
-- `main` must stay green in CI.
-- Release images are built from `v*` tags by GitHub Actions.
-- The release workflow publishes both the immutable version tag and `stable`.
-- If a change should produce a new Docker image for production, bump the version, push `main`, then create and push the matching `vX.Y.Z` tag.
+- `main` должен оставаться зеленым в CI.
+- Release images собираются GitHub Actions по тегам `v*`.
+- Release workflow публикует immutable version tag и mutable tag `stable`.
+- Если изменение должно попасть в production Docker image, обнови версию, запушь `main`, затем создай и запушь matching tag `vX.Y.Z`.

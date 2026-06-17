@@ -6,6 +6,31 @@ from tg_drop_bot.config import Settings
 from tg_drop_bot.db.models import Giveaway, Participant
 from tg_drop_bot.services.dates import format_admin_datetime
 
+GIVEAWAY_STATUS_LABELS = {
+    "draft": "черновик",
+    "published": "опубликован",
+    "finished": "завершен",
+    "cancelled": "отменен",
+}
+
+MEMBERSHIP_STATUS_LABELS = {
+    "creator": "создатель группы",
+    "administrator": "администратор",
+    "member": "участник",
+    "restricted": "ограничен",
+    "left": "не состоит в группе",
+    "kicked": "исключен",
+    "check_failed": "проверка не удалась",
+}
+
+
+def giveaway_status_label(status: str) -> str:
+    return GIVEAWAY_STATUS_LABELS.get(status, status)
+
+
+def membership_status_label(status: str) -> str:
+    return MEMBERSHIP_STATUS_LABELS.get(status, status)
+
 
 def render_giveaway_post(giveaway: Giveaway, settings: Settings, *, closed: bool = False) -> str:
     title = "Розыгрыш завершен" if closed else "Розыгрыш"
@@ -34,7 +59,7 @@ def render_giveaway_card(giveaway: Giveaway, settings: Settings, participants_co
     return "\n".join(
         [
             f"<b>Розыгрыш #{giveaway.id}</b>",
-            f"Статус: <b>{html.escape(giveaway.status)}</b>",
+            f"Статус: <b>{html.escape(giveaway_status_label(giveaway.status))}</b>",
             f"Группа: {html.escape(group_name)}",
             f"Дедлайн: {format_admin_datetime(giveaway.deadline_at, settings.timezone)}",
             f"Участников: {participants_count}",
