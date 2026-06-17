@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: tg_drop_bot
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d tg_drop_bot"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      BOT_TOKEN: "123456:test"
+      ADMIN_IDS: "1"
+      APP_SECRET_KEY: "ci-secret"
+      DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/tg_drop_bot"
+      TEST_DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/tg_drop_bot"
+      REDIS_URL: "redis://localhost:6379/0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.6.1"
+      - name: Install dependencies
+        run: uv sync --frozen --dev
+      - name: Lint
+        run: uv run ruff check .
+      - name: Type check
+        run: uv run mypy src tests
+      - name: Apply migrations
+        run: uv run alembic upgrade head
+      - name: Test
+        run: uv run pytest
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: tg-drop-bot:ci
