@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 
 from captcha.image import ImageCaptcha
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tg_drop_bot.config import Settings
@@ -21,6 +22,17 @@ class CaptchaVerification:
     ok: bool
     reason: str
     attempts_left: int = 0
+
+
+def is_blocking_captcha_challenge(challenge: CaptchaChallenge) -> bool:
+    now = utc_now()
+    if challenge.status == "pending":
+        return challenge.expires_at > now
+    return bool(
+        challenge.status == "failed"
+        and challenge.cooldown_until is not None
+        and challenge.cooldown_until > now
+    )
 
 
 def hash_captcha_answer(answer: str, settings: Settings) -> str:
@@ -56,6 +68,35 @@ async def create_captcha_challenge(
     session.add(challenge)
     await session.flush()
     return challenge, render_captcha_png(code)
+
+
+async def get_blocking_captcha_challenge(
+    session: AsyncSession,
+    giveaway_id: int,
+    user_id: int,
+) -> CaptchaChallenge | None:
+    now = utc_now()
+    result = await session.execute(
+        select(CaptchaChallenge)
+        .where(
+            CaptchaChallenge.giveaway_id == giveaway_id,
+            CaptchaChallenge.user_id == user_id,
+            or_(
+                and_(
+                    CaptchaChallenge.status == "pending",
+                    CaptchaChallenge.expires_at > now,
+                ),
+                and_(
+                    CaptchaChallenge.status == "failed",
+                    CaptchaChallenge.cooldown_until.is_not(None),
+                    CaptchaChallenge.cooldown_until > now,
+                ),
+            ),
+        )
+        .order_by(CaptchaChallenge.created_at.desc(), CaptchaChallenge.id.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
 
 
 async def verify_captcha_answer(

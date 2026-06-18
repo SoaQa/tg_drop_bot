@@ -13,7 +13,11 @@ from tg_drop_bot.bot.states import CaptchaStates
 from tg_drop_bot.config import Settings
 from tg_drop_bot.db.models import CaptchaChallenge
 from tg_drop_bot.services.access import is_admin
-from tg_drop_bot.services.captcha import create_captcha_challenge, verify_captcha_answer
+from tg_drop_bot.services.captcha import (
+    create_captcha_challenge,
+    get_blocking_captcha_challenge,
+    verify_captcha_answer,
+)
 from tg_drop_bot.services.conditions import check_participant_conditions
 from tg_drop_bot.services.giveaways import get_giveaway, register_participant
 
@@ -81,6 +85,19 @@ async def start_captcha_flow(
     )
     if participant is not None and not created:
         await message.answer("Ваше участие уже засчитано.")
+        return
+
+    blocking_challenge = await get_blocking_captcha_challenge(
+        session, giveaway_id, message.from_user.id
+    )
+    if blocking_challenge is not None:
+        if blocking_challenge.status == "failed":
+            await message.answer("Слишком много попыток. Попробуйте позже.")
+        else:
+            await message.answer(
+                "Капча уже отправлена. Введите код из последнего сообщения с картинкой "
+                "или нажмите кнопку участия позже."
+            )
         return
 
     challenge, image_bytes = await create_captcha_challenge(
