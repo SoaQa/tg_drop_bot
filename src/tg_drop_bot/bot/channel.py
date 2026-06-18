@@ -5,9 +5,9 @@ from aiogram.enums import ChatMemberStatus
 from aiogram.types import ChatMemberUpdated
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tg_drop_bot.services.giveaways import upsert_known_group
+from tg_drop_bot.services.giveaways import upsert_known_channel
 
-router = Router(name="group")
+router = Router(name="channel")
 
 
 @router.my_chat_member()
@@ -17,7 +17,7 @@ async def bot_membership_changed(event: ChatMemberUpdated, session: AsyncSession
     status = event.new_chat_member.status
     is_active = status not in {ChatMemberStatus.LEFT, ChatMemberStatus.KICKED}
     bot_is_admin = status == ChatMemberStatus.ADMINISTRATOR
-    await upsert_known_group(
+    await upsert_known_channel(
         session,
         telegram_chat_id=event.chat.id,
         title=event.chat.title or str(event.chat.id),

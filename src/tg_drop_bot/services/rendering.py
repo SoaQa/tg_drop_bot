@@ -68,13 +68,13 @@ def render_giveaway_post(
 
 
 def render_giveaway_card(giveaway: Giveaway, settings: Settings, participants_count: int) -> str:
-    group_name = giveaway.group.title if giveaway.group else "не выбран"
+    channel_name = giveaway.channel.title if giveaway.channel else "не выбран"
     return "\n".join(
         [
             f"<b>Розыгрыш #{giveaway.id}</b>",
             f"Название: {html.escape(giveaway_title(giveaway))}",
             f"Статус: <b>{html.escape(giveaway_status_label(giveaway.status))}</b>",
-            f"Канал: {html.escape(group_name)}",
+            f"Канал: {html.escape(channel_name)}",
             f"Описание: {html.escape(giveaway.post_text or 'не задано')}",
             f"Дедлайн: {format_admin_datetime(giveaway.deadline_at, settings.timezone)}",
             f"Участников: {participants_count}",

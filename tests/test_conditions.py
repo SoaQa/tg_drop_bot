@@ -2,7 +2,7 @@ from typing import cast
 
 from aiogram import Bot
 
-from tg_drop_bot.db.models import Giveaway, KnownGroup
+from tg_drop_bot.db.models import Giveaway, KnownChannel
 from tg_drop_bot.services import conditions
 from tg_drop_bot.services.conditions import (
     CHANNEL_SUBSCRIPTION_CONDITION,
@@ -16,12 +16,12 @@ def test_condition_label_is_russian() -> None:
 
 
 async def test_check_participant_conditions_accepts_channel_subscriber(monkeypatch) -> None:
-    async def fake_is_group_member(bot, chat_id: int, user_id: int) -> tuple[bool, str]:
+    async def fake_is_channel_member(bot, chat_id: int, user_id: int) -> tuple[bool, str]:
         return True, "member"
 
-    monkeypatch.setattr(conditions, "is_group_member", fake_is_group_member)
+    monkeypatch.setattr(conditions, "is_channel_member", fake_is_channel_member)
     giveaway = Giveaway(
-        group=KnownGroup(
+        channel=KnownChannel(
             telegram_chat_id=-100123,
             title="Канал",
             is_active=True,
@@ -37,12 +37,12 @@ async def test_check_participant_conditions_accepts_channel_subscriber(monkeypat
 
 
 async def test_check_participant_conditions_rejects_non_subscriber(monkeypatch) -> None:
-    async def fake_is_group_member(bot, chat_id: int, user_id: int) -> tuple[bool, str]:
+    async def fake_is_channel_member(bot, chat_id: int, user_id: int) -> tuple[bool, str]:
         return False, "left"
 
-    monkeypatch.setattr(conditions, "is_group_member", fake_is_group_member)
+    monkeypatch.setattr(conditions, "is_channel_member", fake_is_channel_member)
     giveaway = Giveaway(
-        group=KnownGroup(
+        channel=KnownChannel(
             telegram_chat_id=-100123,
             title="Канал",
             is_active=True,

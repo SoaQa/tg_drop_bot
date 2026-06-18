@@ -31,8 +31,8 @@ class TimestampMixin:
     )
 
 
-class KnownGroup(Base, TimestampMixin):
-    __tablename__ = "known_groups"
+class KnownChannel(Base, TimestampMixin):
+    __tablename__ = "known_channels"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     telegram_chat_id: Mapped[int] = mapped_column(
@@ -43,7 +43,7 @@ class KnownGroup(Base, TimestampMixin):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     bot_is_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
-    giveaways: Mapped[list[Giveaway]] = relationship(back_populates="group")
+    giveaways: Mapped[list[Giveaway]] = relationship(back_populates="channel")
 
 
 class Giveaway(Base, TimestampMixin):
@@ -52,7 +52,7 @@ class Giveaway(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     status: Mapped[str] = mapped_column(String(32), default="draft", index=True, nullable=False)
     creator_user_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
-    group_id: Mapped[int | None] = mapped_column(ForeignKey("known_groups.id"), nullable=True)
+    channel_id: Mapped[int | None] = mapped_column(ForeignKey("known_channels.id"), nullable=True)
     title: Mapped[str | None] = mapped_column(String(255), nullable=True)
     post_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     terms_text: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -65,7 +65,7 @@ class Giveaway(Base, TimestampMixin):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    group: Mapped[KnownGroup | None] = relationship(back_populates="giveaways")
+    channel: Mapped[KnownChannel | None] = relationship(back_populates="giveaways")
     participants: Mapped[list[Participant]] = relationship(back_populates="giveaway")
     winners: Mapped[list[Winner]] = relationship(back_populates="giveaway")
 

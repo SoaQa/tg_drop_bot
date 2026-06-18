@@ -19,12 +19,15 @@ def chat_member_status_value(status: ChatMemberStatus | str) -> str:
     return status.value if isinstance(status, ChatMemberStatus) else status
 
 
-async def is_group_member(bot: Bot, chat_id: int, user_id: int) -> tuple[bool, str]:
+async def is_channel_member(bot: Bot, channel_chat_id: int, user_id: int) -> tuple[bool, str]:
     try:
-        member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
+        member = await bot.get_chat_member(chat_id=channel_chat_id, user_id=user_id)
     except TelegramAPIError as exc:
         logger.warning(
-            "Failed to check membership for user %s in chat %s: %s", user_id, chat_id, exc
+            "Failed to check membership for user %s in channel %s: %s",
+            user_id,
+            channel_chat_id,
+            exc,
         )
         return False, "check_failed"
     status = chat_member_status_value(member.status)

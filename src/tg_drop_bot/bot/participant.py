@@ -15,7 +15,7 @@ from tg_drop_bot.bot.keyboards import (
 )
 from tg_drop_bot.bot.states import CaptchaStates
 from tg_drop_bot.config import Settings
-from tg_drop_bot.db.models import CaptchaChallenge
+from tg_drop_bot.db.models import CaptchaChallenge, Participant
 from tg_drop_bot.services.access import is_admin
 from tg_drop_bot.services.captcha import (
     create_captcha_challenge,
@@ -28,7 +28,7 @@ from tg_drop_bot.services.conditions import check_participant_conditions
 from tg_drop_bot.services.giveaways import (
     get_giveaway,
     list_published_giveaways,
-    register_participant,
+    register_participant_after_condition_check,
     single_giveaway_or_none,
 )
 
@@ -116,7 +116,7 @@ async def start_captcha_flow(
     if participant_user is None:
         return
     giveaway = await get_giveaway(session, giveaway_id)
-    if giveaway is None or giveaway.status != "published" or giveaway.group is None:
+    if giveaway is None or giveaway.status != "published" or giveaway.channel is None:
         await message.answer("Этот розыгрыш сейчас недоступен.")
         return
 
@@ -125,10 +125,8 @@ async def start_captcha_flow(
         await message.answer(condition_check.user_message or "Условия участия не выполнены.")
         return
 
-    participant, created = await register_participant_if_already_solved(
-        session, giveaway_id, participant_user.id
-    )
-    if participant is not None and not created:
+    participant = await get_existing_participant(session, giveaway_id, participant_user.id)
+    if participant is not None:
         await message.answer("Ваше участие уже засчитано.")
         return
 
@@ -161,6 +159,7 @@ async def refresh_captcha_callback(
     state: FSMContext,
     session: AsyncSession,
     settings: Settings,
+    bot: Bot,
 ) -> None:
     assert callback.data is not None
     if callback.from_user is None or not isinstance(callback.message, Message):
@@ -178,8 +177,16 @@ async def refresh_captcha_callback(
         return
 
     giveaway = await get_giveaway(session, challenge.giveaway_id)
-    if giveaway is None or giveaway.status != "published":
+    if giveaway is None or giveaway.status != "published" or giveaway.channel is None:
         await callback.answer("Розыгрыш сейчас недоступен.", show_alert=True)
+        return
+
+    condition_check = await check_participant_conditions(bot, giveaway, callback.from_user.id)
+    if not condition_check.ok:
+        await callback.answer()
+        await callback.message.answer(
+            condition_check.user_message or "Условия участия не выполнены."
+        )
         return
 
     challenge.status = "expired"
@@ -215,14 +222,12 @@ async def send_captcha_challenge(
     )
 
 
-async def register_participant_if_already_solved(
+async def get_existing_participant(
     session: AsyncSession,
     giveaway_id: int,
     user_id: int,
-) -> tuple[object | None, bool]:
+) -> Participant | None:
     from sqlalchemy import select
-
-    from tg_drop_bot.db.models import Participant
 
     result = await session.execute(
         select(Participant).where(
@@ -230,8 +235,7 @@ async def register_participant_if_already_solved(
             Participant.user_id == user_id,
         )
     )
-    participant = result.scalar_one_or_none()
-    return participant, False
+    return result.scalar_one_or_none()
 
 
 @router.message(CaptchaStates.answer)
@@ -240,6 +244,7 @@ async def captcha_answer(
     state: FSMContext,
     session: AsyncSession,
     settings: Settings,
+    bot: Bot,
 ) -> None:
     if message.from_user is None or not message.text:
         await message.answer("Введите код текстом.")
@@ -250,7 +255,7 @@ async def captcha_answer(
         challenge = await get_latest_pending_captcha_challenge(session, message.from_user.id)
     else:
         challenge = await session.get(CaptchaChallenge, challenge_id)
-    await process_captcha_answer(message, state, session, settings, challenge)
+    await process_captcha_answer(message, state, session, settings, bot, challenge)
 
 
 @router.message(StateFilter(None), F.chat.type == "private", F.text.regexp(r"^[A-Za-z0-9]{3,16}$"))
@@ -259,6 +264,7 @@ async def captcha_answer_without_state(
     state: FSMContext,
     session: AsyncSession,
     settings: Settings,
+    bot: Bot,
 ) -> None:
     if message.from_user is None or not message.text:
         return
@@ -267,7 +273,7 @@ async def captcha_answer_without_state(
     challenge = await get_latest_pending_captcha_challenge(session, message.from_user.id)
     if challenge is None:
         return
-    await process_captcha_answer(message, state, session, settings, challenge)
+    await process_captcha_answer(message, state, session, settings, bot, challenge)
 
 
 async def process_captcha_answer(
@@ -275,6 +281,7 @@ async def process_captcha_answer(
     state: FSMContext,
     session: AsyncSession,
     settings: Settings,
+    bot: Bot,
     challenge: CaptchaChallenge | None,
 ) -> None:
     if message.from_user is None or not message.text:
@@ -304,10 +311,19 @@ async def process_captcha_answer(
             await message.answer("Попытки закончились. Новую капчу можно получить через 1 минуту.")
         return
 
-    participant, created = await register_participant(session, giveaway, message.from_user)
+    registration = await register_participant_after_condition_check(
+        session,
+        bot,
+        giveaway,
+        message.from_user,
+    )
     await session.commit()
     await state.clear()
-    if created:
+    if registration.participant is None:
+        await message.answer(
+            registration.condition_check.user_message or "Условия участия не выполнены."
+        )
+    elif registration.created:
         await message.answer("Готово, участие засчитано.")
     else:
         await message.answer("Ваше участие уже было засчитано.")

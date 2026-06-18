@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import logging
 import random
+from dataclasses import dataclass
 from datetime import UTC
 
 from aiogram import Bot
@@ -14,12 +15,19 @@ from sqlalchemy.orm import selectinload
 
 from tg_drop_bot.bot.keyboards import participation_keyboard
 from tg_drop_bot.config import Settings
-from tg_drop_bot.db.models import AuditLog, Giveaway, KnownGroup, Participant, Winner
-from tg_drop_bot.services.conditions import check_participant_conditions
+from tg_drop_bot.db.models import AuditLog, Giveaway, KnownChannel, Participant, Winner
+from tg_drop_bot.services.conditions import ConditionCheck, check_participant_conditions
 from tg_drop_bot.services.dates import utc_now
 from tg_drop_bot.services.rendering import giveaway_title, mention_participant, render_giveaway_post
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ParticipantRegistration:
+    participant: Participant | None
+    created: bool
+    condition_check: ConditionCheck
 
 
 async def add_audit(
@@ -40,7 +48,7 @@ async def add_audit(
     )
 
 
-async def upsert_known_group(
+async def upsert_known_channel(
     session: AsyncSession,
     *,
     telegram_chat_id: int,
@@ -48,34 +56,34 @@ async def upsert_known_group(
     username: str | None,
     is_active: bool,
     bot_is_admin: bool,
-) -> KnownGroup:
+) -> KnownChannel:
     result = await session.execute(
-        select(KnownGroup).where(KnownGroup.telegram_chat_id == telegram_chat_id)
+        select(KnownChannel).where(KnownChannel.telegram_chat_id == telegram_chat_id)
     )
-    group = result.scalar_one_or_none()
-    if group is None:
-        group = KnownGroup(
+    channel = result.scalar_one_or_none()
+    if channel is None:
+        channel = KnownChannel(
             telegram_chat_id=telegram_chat_id,
             title=title,
             username=username,
             is_active=is_active,
             bot_is_admin=bot_is_admin,
         )
-        session.add(group)
+        session.add(channel)
     else:
-        group.title = title
-        group.username = username
-        group.is_active = is_active
-        group.bot_is_admin = bot_is_admin
+        channel.title = title
+        channel.username = username
+        channel.is_active = is_active
+        channel.bot_is_admin = bot_is_admin
     await session.flush()
-    return group
+    return channel
 
 
-async def list_available_groups(session: AsyncSession) -> list[KnownGroup]:
+async def list_available_channels(session: AsyncSession) -> list[KnownChannel]:
     result = await session.execute(
-        select(KnownGroup)
-        .where(KnownGroup.is_active.is_(True), KnownGroup.bot_is_admin.is_(True))
-        .order_by(KnownGroup.title)
+        select(KnownChannel)
+        .where(KnownChannel.is_active.is_(True), KnownChannel.bot_is_admin.is_(True))
+        .order_by(KnownChannel.title)
     )
     return list(result.scalars().all())
 
@@ -92,7 +100,7 @@ async def create_draft(session: AsyncSession, creator_user_id: int) -> Giveaway:
 
 async def get_giveaway(session: AsyncSession, giveaway_id: int) -> Giveaway | None:
     result = await session.execute(
-        select(Giveaway).options(selectinload(Giveaway.group)).where(Giveaway.id == giveaway_id)
+        select(Giveaway).options(selectinload(Giveaway.channel)).where(Giveaway.id == giveaway_id)
     )
     return result.scalar_one_or_none()
 
@@ -111,7 +119,11 @@ async def list_giveaways_by_status(
     admin_user_id: int,
     current_admin_ids: set[int],
 ) -> list[Giveaway]:
-    query = select(Giveaway).options(selectinload(Giveaway.group)).where(Giveaway.status == status)
+    query = (
+        select(Giveaway)
+        .options(selectinload(Giveaway.channel))
+        .where(Giveaway.status == status)
+    )
     if admin_user_id in current_admin_ids:
         query = query.where(
             (Giveaway.creator_user_id == admin_user_id)
@@ -124,7 +136,7 @@ async def list_giveaways_by_status(
 async def list_published_giveaways(session: AsyncSession) -> list[Giveaway]:
     result = await session.execute(
         select(Giveaway)
-        .options(selectinload(Giveaway.group))
+        .options(selectinload(Giveaway.channel))
         .where(Giveaway.status == "published")
         .order_by(Giveaway.deadline_at.asc(), Giveaway.created_at.desc())
     )
@@ -139,7 +151,7 @@ def single_giveaway_or_none(giveaways: list[Giveaway]) -> Giveaway | None:
 
 def validate_draft(giveaway: Giveaway) -> list[str]:
     missing: list[str] = []
-    if giveaway.group_id is None:
+    if giveaway.channel_id is None:
         missing.append("канал")
     if not giveaway.title:
         missing.append("название")
@@ -161,9 +173,9 @@ async def publish_giveaway(
     giveaway: Giveaway,
     actor_user_id: int,
 ) -> Message:
-    if giveaway.group is None:
-        await session.refresh(giveaway, attribute_names=["group"])
-    if giveaway.group is None:
+    if giveaway.channel is None:
+        await session.refresh(giveaway, attribute_names=["channel"])
+    if giveaway.channel is None:
         raise RuntimeError("Giveaway channel is not selected")
     missing = validate_draft(giveaway)
     if missing:
@@ -174,14 +186,14 @@ async def publish_giveaway(
     keyboard = participation_keyboard(giveaway.id, me.username)
     if giveaway.image_file_id:
         message = await bot.send_photo(
-            chat_id=giveaway.group.telegram_chat_id,
+            chat_id=giveaway.channel.telegram_chat_id,
             photo=giveaway.image_file_id,
             caption=text,
             reply_markup=keyboard,
         )
     else:
         message = await bot.send_message(
-            chat_id=giveaway.group.telegram_chat_id,
+            chat_id=giveaway.channel.telegram_chat_id,
             text=text,
             reply_markup=keyboard,
             disable_web_page_preview=True,
@@ -207,7 +219,7 @@ async def edit_published_message(
     *,
     participants_count: int | None = None,
 ) -> None:
-    if giveaway.status != "published" or giveaway.group is None or giveaway.message_id is None:
+    if giveaway.status != "published" or giveaway.channel is None or giveaway.message_id is None:
         return
     text = render_giveaway_post(
         giveaway,
@@ -219,14 +231,14 @@ async def edit_published_message(
     try:
         if giveaway.image_file_id:
             await bot.edit_message_caption(
-                chat_id=giveaway.group.telegram_chat_id,
+                chat_id=giveaway.channel.telegram_chat_id,
                 message_id=giveaway.message_id,
                 caption=text,
                 reply_markup=keyboard,
             )
         else:
             await bot.edit_message_text(
-                chat_id=giveaway.group.telegram_chat_id,
+                chat_id=giveaway.channel.telegram_chat_id,
                 message_id=giveaway.message_id,
                 text=text,
                 reply_markup=keyboard,
@@ -246,11 +258,11 @@ async def replace_published_image(
     *,
     participants_count: int | None = None,
 ) -> None:
-    if giveaway.group is None or giveaway.message_id is None:
+    if giveaway.channel is None or giveaway.message_id is None:
         return
     giveaway.image_file_id = image_file_id
     await bot.edit_message_media(
-        chat_id=giveaway.group.telegram_chat_id,
+        chat_id=giveaway.channel.telegram_chat_id,
         message_id=giveaway.message_id,
         media=InputMediaPhoto(
             media=image_file_id,
@@ -271,7 +283,7 @@ async def close_source_post(
     *,
     participants_count: int | None = None,
 ) -> None:
-    if giveaway.group is None or giveaway.message_id is None:
+    if giveaway.channel is None or giveaway.message_id is None:
         return
     text = render_giveaway_post(
         giveaway,
@@ -282,14 +294,14 @@ async def close_source_post(
     try:
         if giveaway.image_file_id:
             await bot.edit_message_caption(
-                chat_id=giveaway.group.telegram_chat_id,
+                chat_id=giveaway.channel.telegram_chat_id,
                 message_id=giveaway.message_id,
                 caption=text,
                 reply_markup=None,
             )
         else:
             await bot.edit_message_text(
-                chat_id=giveaway.group.telegram_chat_id,
+                chat_id=giveaway.channel.telegram_chat_id,
                 message_id=giveaway.message_id,
                 text=text,
                 reply_markup=None,
@@ -361,6 +373,30 @@ async def register_participant(
     return participant, True
 
 
+async def register_participant_after_condition_check(
+    session: AsyncSession,
+    bot: Bot,
+    giveaway: Giveaway,
+    user: User,
+) -> ParticipantRegistration:
+    condition_check = await check_participant_conditions(bot, giveaway, user.id)
+    if not condition_check.ok:
+        return ParticipantRegistration(
+            participant=None,
+            created=False,
+            condition_check=condition_check,
+        )
+
+    participant, created = await register_participant(session, giveaway, user)
+    participant.membership_status = condition_check.membership_status
+    participant.membership_checked_at = utc_now()
+    return ParticipantRegistration(
+        participant=participant,
+        created=created,
+        condition_check=condition_check,
+    )
+
+
 async def list_participants(session: AsyncSession, giveaway_id: int) -> list[Participant]:
     result = await session.execute(
         select(Participant)
@@ -386,7 +422,7 @@ async def finish_giveaway(
     actor_user_id: int | None,
     manual: bool,
 ) -> list[Winner]:
-    if giveaway.status != "published" or giveaway.group is None:
+    if giveaway.status != "published" or giveaway.channel is None:
         return []
 
     participants = await list_participants(session, giveaway.id)
@@ -434,7 +470,7 @@ async def publish_winner_announcement(
     winners: list[Participant],
     valid_count: int,
 ) -> None:
-    if giveaway.group is None:
+    if giveaway.channel is None:
         return
     lines = [f"<b>Итоги розыгрыша: {html.escape(giveaway_title(giveaway))}</b>"]
     if winners:
@@ -448,7 +484,7 @@ async def publish_winner_announcement(
     if giveaway.winners_count and valid_count < giveaway.winners_count:
         lines.extend(["", f"Валидных участников было меньше: {valid_count}."])
     message = await bot.send_message(
-        chat_id=giveaway.group.telegram_chat_id,
+        chat_id=giveaway.channel.telegram_chat_id,
         text="\n".join(lines),
         disable_web_page_preview=True,
     )
@@ -458,7 +494,7 @@ async def publish_winner_announcement(
 async def due_published_giveaways(session: AsyncSession) -> list[Giveaway]:
     result = await session.execute(
         select(Giveaway)
-        .options(selectinload(Giveaway.group))
+        .options(selectinload(Giveaway.channel))
         .where(Giveaway.status == "published", Giveaway.deadline_at <= utc_now())
         .order_by(Giveaway.deadline_at.asc())
     )

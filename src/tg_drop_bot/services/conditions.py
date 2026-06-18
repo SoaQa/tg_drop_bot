@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from aiogram import Bot
 
 from tg_drop_bot.db.models import Giveaway
-from tg_drop_bot.services.telegram import is_group_member
+from tg_drop_bot.services.telegram import is_channel_member
 
 CHANNEL_SUBSCRIPTION_CONDITION = "channel_subscription"
 
@@ -30,14 +30,14 @@ async def check_participant_conditions(
     giveaway: Giveaway,
     user_id: int,
 ) -> ConditionCheck:
-    if giveaway.group is None:
+    if giveaway.channel is None:
         return ConditionCheck(
             ok=False,
             membership_status="check_failed",
             user_message="Канал розыгрыша не найден.",
         )
 
-    is_member, status = await is_group_member(bot, giveaway.group.telegram_chat_id, user_id)
+    is_member, status = await is_channel_member(bot, giveaway.channel.telegram_chat_id, user_id)
     if is_member:
         return ConditionCheck(ok=True, membership_status=status)
     if status == "check_failed":

@@ -9,7 +9,7 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from tg_drop_bot.db.models import Giveaway, KnownGroup
+from tg_drop_bot.db.models import Giveaway, KnownChannel
 from tg_drop_bot.services.conditions import CHANNEL_SUBSCRIPTION_CONDITION
 from tg_drop_bot.services.rendering import giveaway_status_label
 
@@ -49,10 +49,10 @@ def channel_request_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
-def groups_keyboard(groups: list[KnownGroup]) -> InlineKeyboardMarkup:
+def channels_keyboard(channels: list[KnownChannel]) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    for group in groups:
-        builder.button(text=group.title, callback_data=f"draft:group:{group.id}")
+    for channel in channels:
+        builder.button(text=channel.title, callback_data=f"draft:channel:{channel.id}")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -164,8 +164,8 @@ def active_giveaways_keyboard(giveaways: list[Giveaway]) -> InlineKeyboardMarkup
     for giveaway in giveaways:
         title = giveaway.title or f"Розыгрыш #{giveaway.id}"
         label = f"Участвовать: {title}"
-        if giveaway.group is not None:
-            label = f"{label} - {giveaway.group.title}"
+        if giveaway.channel is not None:
+            label = f"{label} - {giveaway.channel.title}"
         rows.append(
             [
                 InlineKeyboardButton(

@@ -13,13 +13,13 @@ from tg_drop_bot.bot.keyboards import (
     CHANNEL_REQUEST_ID,
     admin_main_keyboard,
     channel_request_keyboard,
+    channels_keyboard,
     confirm_keyboard,
     draft_conditions_keyboard,
     draft_image_keyboard,
     draft_preview_keyboard,
     giveaway_card_keyboard,
     giveaway_list_keyboard,
-    groups_keyboard,
 )
 from tg_drop_bot.bot.states import DraftStates, EditStates
 from tg_drop_bot.config import Settings
@@ -35,16 +35,30 @@ from tg_drop_bot.services.giveaways import (
     edit_published_message,
     finish_giveaway,
     get_giveaway,
-    list_available_groups,
+    list_available_channels,
     list_giveaways_by_status,
     publish_giveaway,
     replace_published_image,
-    upsert_known_group,
+    upsert_known_channel,
     validate_draft,
 )
 from tg_drop_bot.services.rendering import render_giveaway_card, render_giveaway_post
 
 router = Router(name="admin")
+
+
+def parse_edit_callback_data(data: str | None) -> tuple[str, int] | None:
+    if data is None:
+        return None
+    parts = data.split(":")
+    if (
+        len(parts) != 3
+        or parts[0] != "giveaway"
+        or not parts[1].startswith("edit_")
+        or not parts[2].isdigit()
+    ):
+        return None
+    return parts[1].removeprefix("edit_"), int(parts[2])
 
 
 def admin_only(message: Message, settings: Settings) -> bool:
@@ -57,8 +71,8 @@ async def create_giveaway(
 ) -> None:
     if not admin_only(message, settings):
         return
-    groups = await list_available_groups(session)
-    if not groups:
+    channels = await list_available_channels(session)
+    if not channels:
         await message.answer(
             "Пока нет доступных каналов. Нажмите «Выбрать канал» и выберите канал, "
             "где бот добавлен администратором.",
@@ -67,22 +81,22 @@ async def create_giveaway(
         return
     draft = await create_draft(session, message.from_user.id)
     await session.commit()
-    await state.set_state(DraftStates.choosing_group)
+    await state.set_state(DraftStates.choosing_channel)
     await state.update_data(giveaway_id=draft.id)
-    await message.answer("Выберите канал для розыгрыша.", reply_markup=groups_keyboard(groups))
+    await message.answer("Выберите канал для розыгрыша.", reply_markup=channels_keyboard(channels))
 
 
-@router.callback_query(DraftStates.choosing_group, F.data.startswith("draft:group:"))
-async def draft_group_selected(
+@router.callback_query(DraftStates.choosing_channel, F.data.startswith("draft:channel:"))
+async def draft_channel_selected(
     callback: CallbackQuery, state: FSMContext, session: AsyncSession
 ) -> None:
-    group_id = int(callback.data.split(":")[2])
+    channel_id = int(callback.data.split(":")[2])
     data = await state.get_data()
     giveaway = await get_giveaway(session, data["giveaway_id"])
     if giveaway is None:
         await callback.answer("Черновик не найден.", show_alert=True)
         return
-    giveaway.group_id = group_id
+    giveaway.channel_id = channel_id
     await session.commit()
     await state.set_state(DraftStates.title)
     await callback.message.answer("Введите название розыгрыша.")
@@ -297,19 +311,19 @@ async def list_giveaways(message: Message, session: AsyncSession, settings: Sett
     await message.answer("Выберите розыгрыш.", reply_markup=giveaway_list_keyboard(giveaways))
 
 
-@router.message(StateFilter(None), F.chat.type == "private", F.text.in_({"Каналы", "Группы"}))
+@router.message(StateFilter(None), F.chat.type == "private", F.text == "Каналы")
 async def show_channels(message: Message, session: AsyncSession, settings: Settings) -> None:
     if not admin_only(message, settings):
         return
-    groups = await list_available_groups(session)
-    if not groups:
+    channels = await list_available_channels(session)
+    if not channels:
         await message.answer(
             "Доступных каналов пока нет. Нажмите «Выбрать канал» и выберите канал, "
             "где бот добавлен администратором.",
             reply_markup=channel_request_keyboard(),
         )
         return
-    text = "\n".join(f"- {group.title} ({group.telegram_chat_id})" for group in groups)
+    text = "\n".join(f"- {channel.title} ({channel.telegram_chat_id})" for channel in channels)
     await message.answer(
         text + "\n\nЧтобы добавить еще один канал, нажмите «Выбрать канал».",
         reply_markup=channel_request_keyboard(),
@@ -356,7 +370,7 @@ async def register_shared_channel(
         )
         return
 
-    group = await upsert_known_group(
+    channel = await upsert_known_channel(
         session,
         telegram_chat_id=chat.id,
         title=chat.title or message.chat_shared.title or str(chat.id),
@@ -366,7 +380,7 @@ async def register_shared_channel(
     )
     await session.commit()
     await message.answer(
-        f"Канал добавлен: {group.title}. Теперь его можно выбрать при создании розыгрыша.",
+        f"Канал добавлен: {channel.title}. Теперь его можно выбрать при создании розыгрыша.",
         reply_markup=admin_main_keyboard(),
     )
 
@@ -402,9 +416,11 @@ async def export_csv(callback: CallbackQuery, session: AsyncSession, settings: S
 async def edit_field_start(
     callback: CallbackQuery, state: FSMContext, session: AsyncSession, settings: Settings
 ) -> None:
-    parts = callback.data.split(":")
-    field = parts[1].removeprefix("edit_")
-    giveaway_id = int(parts[2])
+    parsed = parse_edit_callback_data(callback.data)
+    if parsed is None:
+        await callback.answer("Действие устарело. Откройте розыгрыш заново.", show_alert=True)
+        return
+    field, giveaway_id = parsed
     giveaway = await get_giveaway(session, giveaway_id)
     if giveaway is None or not can_manage_giveaway(callback.from_user.id, giveaway, settings):
         await callback.answer("Нет доступа.", show_alert=True)
@@ -423,7 +439,11 @@ async def edit_field_start(
             "В v1 можно только заменить уже опубликованную картинку.", show_alert=True
         )
         return
-    prompt, next_state = prompts[field]
+    prompt_config = prompts.get(field)
+    if prompt_config is None:
+        await callback.answer("Действие устарело. Откройте розыгрыш заново.", show_alert=True)
+        return
+    prompt, next_state = prompt_config
     await state.set_state(next_state)
     if next_state == EditStates.terms:
         await callback.message.answer(prompt, reply_markup=draft_conditions_keyboard())

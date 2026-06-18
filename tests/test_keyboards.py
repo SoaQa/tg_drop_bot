@@ -3,11 +3,12 @@ from tg_drop_bot.bot.keyboards import (
     active_giveaways_keyboard,
     captcha_keyboard,
     channel_request_keyboard,
+    channels_keyboard,
     draft_conditions_keyboard,
     giveaway_card_keyboard,
     participation_keyboard,
 )
-from tg_drop_bot.db.models import Giveaway
+from tg_drop_bot.db.models import Giveaway, KnownChannel
 from tg_drop_bot.services.conditions import CHANNEL_SUBSCRIPTION_CONDITION
 
 
@@ -29,6 +30,16 @@ def test_draft_conditions_keyboard_has_channel_subscription_option() -> None:
 
     assert button.text == "Подписчики канала"
     assert button.callback_data == f"draft:condition:{CHANNEL_SUBSCRIPTION_CONDITION}"
+
+
+def test_channels_keyboard_uses_channel_callback() -> None:
+    keyboard = channels_keyboard(
+        [KnownChannel(id=3, telegram_chat_id=-100123, title="Канал", bot_is_admin=True)]
+    )
+    button = keyboard.inline_keyboard[0][0]
+
+    assert button.text == "Канал"
+    assert button.callback_data == "draft:channel:3"
 
 
 def test_giveaway_card_keyboard_uses_human_friendly_labels() -> None:

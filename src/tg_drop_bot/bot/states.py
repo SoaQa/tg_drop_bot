@@ -2,7 +2,7 @@ from aiogram.fsm.state import State, StatesGroup
 
 
 class DraftStates(StatesGroup):
-    choosing_group = State()
+    choosing_channel = State()
     title = State()
     post_text = State()
     terms_text = State()

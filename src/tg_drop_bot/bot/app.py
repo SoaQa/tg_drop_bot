@@ -9,7 +9,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 
-from tg_drop_bot.bot import admin, group, participant
+from tg_drop_bot.bot import admin, channel, participant
 from tg_drop_bot.bot.rate_limit import RateLimitMiddleware
 from tg_drop_bot.config import Settings
 from tg_drop_bot.db.middleware import DbSessionMiddleware
@@ -33,7 +33,7 @@ async def run_bot() -> None:
     dispatcher.message.middleware(RateLimitMiddleware())
     dispatcher.callback_query.middleware(RateLimitMiddleware())
     dispatcher.update.middleware(DbSessionMiddleware())
-    dispatcher.include_router(group.router)
+    dispatcher.include_router(channel.router)
     dispatcher.include_router(participant.router)
     dispatcher.include_router(admin.router)
 
