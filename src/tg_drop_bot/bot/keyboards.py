@@ -153,6 +153,23 @@ def giveaway_card_keyboard(giveaway: Giveaway) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def active_giveaways_keyboard(giveaways: list[Giveaway]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for giveaway in giveaways:
+        label = f"Участвовать в розыгрыше #{giveaway.id}"
+        if giveaway.group is not None:
+            label = f"{label} - {giveaway.group.title}"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=label,
+                    callback_data=f"participate:{giveaway.id}",
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def confirm_keyboard(action: str, giveaway_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[

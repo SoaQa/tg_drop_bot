@@ -117,6 +117,22 @@ async def list_giveaways_by_status(
     return list(result.scalars().all())
 
 
+async def list_published_giveaways(session: AsyncSession) -> list[Giveaway]:
+    result = await session.execute(
+        select(Giveaway)
+        .options(selectinload(Giveaway.group))
+        .where(Giveaway.status == "published")
+        .order_by(Giveaway.deadline_at.asc(), Giveaway.created_at.desc())
+    )
+    return list(result.scalars().all())
+
+
+def single_giveaway_or_none(giveaways: list[Giveaway]) -> Giveaway | None:
+    if len(giveaways) == 1:
+        return giveaways[0]
+    return None
+
+
 def validate_draft(giveaway: Giveaway) -> list[str]:
     missing: list[str] = []
     if giveaway.group_id is None:

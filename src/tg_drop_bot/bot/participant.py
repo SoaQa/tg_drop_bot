@@ -5,10 +5,10 @@ import re
 from aiogram import Bot, F, Router
 from aiogram.filters import CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.types import BufferedInputFile, CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, Message, User
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tg_drop_bot.bot.keyboards import admin_main_keyboard
+from tg_drop_bot.bot.keyboards import active_giveaways_keyboard, admin_main_keyboard
 from tg_drop_bot.bot.states import CaptchaStates
 from tg_drop_bot.config import Settings
 from tg_drop_bot.db.models import CaptchaChallenge
@@ -19,7 +19,12 @@ from tg_drop_bot.services.captcha import (
     verify_captcha_answer,
 )
 from tg_drop_bot.services.conditions import check_participant_conditions
-from tg_drop_bot.services.giveaways import get_giveaway, register_participant
+from tg_drop_bot.services.giveaways import (
+    get_giveaway,
+    list_published_giveaways,
+    register_participant,
+    single_giveaway_or_none,
+)
 
 router = Router(name="participant")
 
@@ -27,9 +32,29 @@ GIVEAWAY_PAYLOAD_RE = re.compile(r"^giveaway_(\d+)$")
 
 
 @router.callback_query(F.data.startswith("participate:"))
-async def participate_callback(callback: CallbackQuery, bot: Bot) -> None:
+async def participate_callback(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession,
+    settings: Settings,
+    bot: Bot,
+) -> None:
     assert callback.data is not None
     giveaway_id = int(callback.data.split(":")[1])
+    if isinstance(callback.message, Message) and callback.message.chat.type == "private":
+        await callback.answer()
+        await state.clear()
+        await start_captcha_flow(
+            callback.message,
+            state,
+            session,
+            settings,
+            bot,
+            giveaway_id,
+            user=callback.from_user,
+        )
+        return
+
     me = await bot.get_me()
     if me.username is None:
         await callback.answer(
@@ -57,6 +82,17 @@ async def start_message(
     if message.from_user and is_admin(message.from_user.id, settings):
         await message.answer("Админка открыта.", reply_markup=admin_main_keyboard())
     else:
+        giveaways = await list_published_giveaways(session)
+        single_giveaway = single_giveaway_or_none(giveaways)
+        if single_giveaway is not None:
+            await start_captcha_flow(message, state, session, settings, bot, single_giveaway.id)
+            return
+        if giveaways:
+            await message.answer(
+                "Выберите розыгрыш, в котором хотите участвовать.",
+                reply_markup=active_giveaways_keyboard(giveaways),
+            )
+            return
         await message.answer("Чтобы участвовать в розыгрыше, нажмите кнопку под постом в канале.")
 
 
@@ -67,28 +103,31 @@ async def start_captcha_flow(
     settings: Settings,
     bot: Bot,
     giveaway_id: int,
+    *,
+    user: User | None = None,
 ) -> None:
-    if message.from_user is None:
+    participant_user = user or message.from_user
+    if participant_user is None:
         return
     giveaway = await get_giveaway(session, giveaway_id)
     if giveaway is None or giveaway.status != "published" or giveaway.group is None:
         await message.answer("Этот розыгрыш сейчас недоступен.")
         return
 
-    condition_check = await check_participant_conditions(bot, giveaway, message.from_user.id)
+    condition_check = await check_participant_conditions(bot, giveaway, participant_user.id)
     if not condition_check.ok:
         await message.answer(condition_check.user_message or "Условия участия не выполнены.")
         return
 
     participant, created = await register_participant_if_already_solved(
-        session, giveaway_id, message.from_user.id
+        session, giveaway_id, participant_user.id
     )
     if participant is not None and not created:
         await message.answer("Ваше участие уже засчитано.")
         return
 
     blocking_challenge = await get_blocking_captcha_challenge(
-        session, giveaway_id, message.from_user.id
+        session, giveaway_id, participant_user.id
     )
     if blocking_challenge is not None:
         if blocking_challenge.status == "failed":
@@ -101,7 +140,7 @@ async def start_captcha_flow(
         return
 
     challenge, image_bytes = await create_captcha_challenge(
-        session, settings, giveaway.id, message.from_user.id
+        session, settings, giveaway.id, participant_user.id
     )
     await session.commit()
     await state.set_state(CaptchaStates.answer)
