@@ -58,5 +58,5 @@ class RateLimitMiddleware(BaseMiddleware):
 
     @staticmethod
     async def _notify_limited(event: TelegramObject) -> None:
-        if isinstance(event, CallbackQuery):
+        if isinstance(event, CallbackQuery | Message):
             await event.answer("Слишком часто. Попробуйте чуть позже.")

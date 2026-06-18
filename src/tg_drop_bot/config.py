@@ -41,8 +41,8 @@ class Settings(BaseSettings):
 
     scheduler_interval_seconds: int = Field(default=30, alias="SCHEDULER_INTERVAL_SECONDS")
     rate_limit_enabled: bool = Field(default=True, alias="RATE_LIMIT_ENABLED")
-    rate_limit_user_updates: int = Field(default=8, alias="RATE_LIMIT_USER_UPDATES")
-    rate_limit_user_window_seconds: int = Field(default=3, alias="RATE_LIMIT_USER_WINDOW_SECONDS")
+    rate_limit_user_updates: int = Field(default=50, alias="RATE_LIMIT_USER_UPDATES")
+    rate_limit_user_window_seconds: int = Field(default=60, alias="RATE_LIMIT_USER_WINDOW_SECONDS")
     rate_limit_participate_seconds: int = Field(default=5, alias="RATE_LIMIT_PARTICIPATE_SECONDS")
 
     @cached_property

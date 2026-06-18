@@ -9,10 +9,14 @@ from aiogram.exceptions import TelegramAPIError
 logger = logging.getLogger(__name__)
 
 VALID_MEMBER_STATUSES = {
-    ChatMemberStatus.CREATOR,
-    ChatMemberStatus.ADMINISTRATOR,
-    ChatMemberStatus.MEMBER,
+    ChatMemberStatus.CREATOR.value,
+    ChatMemberStatus.ADMINISTRATOR.value,
+    ChatMemberStatus.MEMBER.value,
 }
+
+
+def chat_member_status_value(status: ChatMemberStatus | str) -> str:
+    return status.value if isinstance(status, ChatMemberStatus) else status
 
 
 async def is_group_member(bot: Bot, chat_id: int, user_id: int) -> tuple[bool, str]:
@@ -23,5 +27,5 @@ async def is_group_member(bot: Bot, chat_id: int, user_id: int) -> tuple[bool, s
             "Failed to check membership for user %s in chat %s: %s", user_id, chat_id, exc
         )
         return False, "check_failed"
-    status = member.status
-    return status in VALID_MEMBER_STATUSES, str(status.value)
+    status = chat_member_status_value(member.status)
+    return status in VALID_MEMBER_STATUSES, status
