@@ -142,6 +142,14 @@ def giveaway_card_keyboard(giveaway: Giveaway) -> InlineKeyboardMarkup:
                 ),
             ]
         )
+    elif giveaway.status == "draft":
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="Удалить черновик", callback_data=f"draft:delete:{giveaway.id}"
+                )
+            ]
+        )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

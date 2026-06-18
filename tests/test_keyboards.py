@@ -36,3 +36,12 @@ def test_giveaway_card_keyboard_uses_human_friendly_labels() -> None:
     assert "CSV" not in labels
     assert "Изменить текст" in labels
     assert "Условие участия" in labels
+
+
+def test_draft_giveaway_card_keyboard_has_delete_button() -> None:
+    keyboard = giveaway_card_keyboard(Giveaway(id=1, creator_user_id=1, status="draft"))
+    labels = [button.text for row in keyboard.inline_keyboard for button in row]
+    callbacks = [button.callback_data for row in keyboard.inline_keyboard for button in row]
+
+    assert "Удалить черновик" in labels
+    assert "draft:delete:1" in callbacks
