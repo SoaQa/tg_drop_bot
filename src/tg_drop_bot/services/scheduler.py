@@ -8,7 +8,11 @@ from aiogram import Bot
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tg_drop_bot.config import Settings
-from tg_drop_bot.services.giveaways import due_published_giveaways, finish_giveaway
+from tg_drop_bot.services.giveaways import (
+    due_published_giveaways,
+    finish_giveaway,
+    refresh_published_giveaway_messages,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +51,11 @@ class GiveawayScheduler:
 
     async def tick(self) -> None:
         async with self.session_factory() as session:
+            try:
+                await refresh_published_giveaway_messages(session, self.bot, self.settings)
+            except Exception:
+                logger.exception("Giveaway participant counter refresh failed")
+
             giveaways = await due_published_giveaways(session)
             for giveaway in giveaways:
                 await finish_giveaway(

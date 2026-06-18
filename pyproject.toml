@@ -1,6 +1,6 @@
 [project]
 name = "tg-drop-bot"
-version = "0.4.3"
+version = "0.5.0"
 description = "Telegram giveaway bot with admin panel, captcha, PostgreSQL, and Docker deploy."
 readme = "README.md"
 requires-python = ">=3.12"

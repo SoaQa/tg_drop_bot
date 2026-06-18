@@ -482,7 +482,13 @@ async def update_text_field(
         await message.answer("Нет доступа.")
         return
     setattr(giveaway, field, value.strip())
-    await edit_published_message(bot, settings, giveaway)
+    participants_count = await count_participants(session, giveaway.id)
+    await edit_published_message(
+        bot,
+        settings,
+        giveaway,
+        participants_count=participants_count,
+    )
     await add_audit(
         session,
         f"giveaway.edited.{field}",
@@ -513,7 +519,13 @@ async def edit_deadline(
         await message.answer("Нет доступа.")
         return
     giveaway.deadline_at = deadline
-    await edit_published_message(bot, settings, giveaway)
+    participants_count = await count_participants(session, giveaway.id)
+    await edit_published_message(
+        bot,
+        settings,
+        giveaway,
+        participants_count=participants_count,
+    )
     await add_audit(
         session,
         "giveaway.edited.deadline",
@@ -546,7 +558,13 @@ async def edit_winners(
         await message.answer("Нет доступа.")
         return
     giveaway.winners_count = count
-    await edit_published_message(bot, settings, giveaway)
+    participants_count = await count_participants(session, giveaway.id)
+    await edit_published_message(
+        bot,
+        settings,
+        giveaway,
+        participants_count=participants_count,
+    )
     await add_audit(
         session,
         "giveaway.edited.winners_count",
@@ -574,7 +592,14 @@ async def edit_image(
     ):
         await message.answer("Нет доступа.")
         return
-    await replace_published_image(bot, settings, giveaway, message.photo[-1].file_id)
+    participants_count = await count_participants(session, giveaway.id)
+    await replace_published_image(
+        bot,
+        settings,
+        giveaway,
+        message.photo[-1].file_id,
+        participants_count=participants_count,
+    )
     await add_audit(
         session,
         "giveaway.edited.image",

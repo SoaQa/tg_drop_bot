@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import logging
 import random
 from datetime import UTC
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramAPIError
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.types import BufferedInputFile, InputMediaPhoto, Message, User
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +17,8 @@ from tg_drop_bot.db.models import AuditLog, Giveaway, KnownGroup, Participant, W
 from tg_drop_bot.services.conditions import check_participant_conditions
 from tg_drop_bot.services.dates import utc_now
 from tg_drop_bot.services.rendering import mention_participant, render_giveaway_post
+
+logger = logging.getLogger(__name__)
 
 
 async def add_audit(
@@ -163,7 +166,7 @@ async def publish_giveaway(
     if missing:
         raise RuntimeError("Draft is incomplete: " + ", ".join(missing))
 
-    text = render_giveaway_post(giveaway, settings)
+    text = render_giveaway_post(giveaway, settings, participants_count=0)
     me = await bot.get_me()
     keyboard = participation_keyboard(giveaway.id, me.username)
     if giveaway.image_file_id:
@@ -198,27 +201,38 @@ async def edit_published_message(
     bot: Bot,
     settings: Settings,
     giveaway: Giveaway,
+    *,
+    participants_count: int | None = None,
 ) -> None:
     if giveaway.status != "published" or giveaway.group is None or giveaway.message_id is None:
         return
-    text = render_giveaway_post(giveaway, settings)
+    text = render_giveaway_post(
+        giveaway,
+        settings,
+        participants_count=participants_count,
+    )
     me = await bot.get_me()
     keyboard = participation_keyboard(giveaway.id, me.username)
-    if giveaway.image_file_id:
-        await bot.edit_message_caption(
-            chat_id=giveaway.group.telegram_chat_id,
-            message_id=giveaway.message_id,
-            caption=text,
-            reply_markup=keyboard,
-        )
-    else:
-        await bot.edit_message_text(
-            chat_id=giveaway.group.telegram_chat_id,
-            message_id=giveaway.message_id,
-            text=text,
-            reply_markup=keyboard,
-            disable_web_page_preview=True,
-        )
+    try:
+        if giveaway.image_file_id:
+            await bot.edit_message_caption(
+                chat_id=giveaway.group.telegram_chat_id,
+                message_id=giveaway.message_id,
+                caption=text,
+                reply_markup=keyboard,
+            )
+        else:
+            await bot.edit_message_text(
+                chat_id=giveaway.group.telegram_chat_id,
+                message_id=giveaway.message_id,
+                text=text,
+                reply_markup=keyboard,
+                disable_web_page_preview=True,
+            )
+    except TelegramBadRequest as error:
+        if "message is not modified" in str(error).lower():
+            return
+        raise
 
 
 async def replace_published_image(
@@ -226,6 +240,8 @@ async def replace_published_image(
     settings: Settings,
     giveaway: Giveaway,
     image_file_id: str,
+    *,
+    participants_count: int | None = None,
 ) -> None:
     if giveaway.group is None or giveaway.message_id is None:
         return
@@ -234,16 +250,32 @@ async def replace_published_image(
         chat_id=giveaway.group.telegram_chat_id,
         message_id=giveaway.message_id,
         media=InputMediaPhoto(
-            media=image_file_id, caption=render_giveaway_post(giveaway, settings)
+            media=image_file_id,
+            caption=render_giveaway_post(
+                giveaway,
+                settings,
+                participants_count=participants_count,
+            ),
         ),
         reply_markup=participation_keyboard(giveaway.id, (await bot.get_me()).username),
     )
 
 
-async def close_source_post(bot: Bot, settings: Settings, giveaway: Giveaway) -> None:
+async def close_source_post(
+    bot: Bot,
+    settings: Settings,
+    giveaway: Giveaway,
+    *,
+    participants_count: int | None = None,
+) -> None:
     if giveaway.group is None or giveaway.message_id is None:
         return
-    text = render_giveaway_post(giveaway, settings, closed=True)
+    text = render_giveaway_post(
+        giveaway,
+        settings,
+        closed=True,
+        participants_count=participants_count,
+    )
     try:
         if giveaway.image_file_id:
             await bot.edit_message_caption(
@@ -272,9 +304,15 @@ async def cancel_giveaway(
     giveaway: Giveaway,
     actor_user_id: int,
 ) -> None:
+    participants_count = await count_participants(session, giveaway.id)
     giveaway.status = "cancelled"
     giveaway.cancelled_at = utc_now()
-    await close_source_post(bot, settings, giveaway)
+    await close_source_post(
+        bot,
+        settings,
+        giveaway,
+        participants_count=participants_count,
+    )
     await add_audit(
         session, "giveaway.cancelled", giveaway_id=giveaway.id, actor_user_id=actor_user_id
     )
@@ -375,7 +413,7 @@ async def finish_giveaway(
     await session.flush()
 
     await publish_winner_announcement(bot, giveaway, selected, len(valid_participants))
-    await close_source_post(bot, settings, giveaway)
+    await close_source_post(bot, settings, giveaway, participants_count=len(participants))
     await add_audit(
         session,
         "giveaway.finished.manual" if manual else "giveaway.finished.auto",
@@ -422,6 +460,28 @@ async def due_published_giveaways(session: AsyncSession) -> list[Giveaway]:
         .order_by(Giveaway.deadline_at.asc())
     )
     return list(result.scalars().all())
+
+
+async def refresh_published_giveaway_messages(
+    session: AsyncSession,
+    bot: Bot,
+    settings: Settings,
+) -> None:
+    giveaways = await list_published_giveaways(session)
+    for giveaway in giveaways:
+        participants_count = await count_participants(session, giveaway.id)
+        try:
+            await edit_published_message(
+                bot,
+                settings,
+                giveaway,
+                participants_count=participants_count,
+            )
+        except TelegramAPIError:
+            logger.exception(
+                "Failed to refresh giveaway message",
+                extra={"giveaway_id": giveaway.id},
+            )
 
 
 async def build_csv_file(session: AsyncSession, giveaway_id: int) -> BufferedInputFile:

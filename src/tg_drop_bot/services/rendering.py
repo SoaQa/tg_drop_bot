@@ -32,7 +32,13 @@ def membership_status_label(status: str) -> str:
     return MEMBERSHIP_STATUS_LABELS.get(status, status)
 
 
-def render_giveaway_post(giveaway: Giveaway, settings: Settings, *, closed: bool = False) -> str:
+def render_giveaway_post(
+    giveaway: Giveaway,
+    settings: Settings,
+    *,
+    closed: bool = False,
+    participants_count: int | None = None,
+) -> str:
     title = "Розыгрыш завершен" if closed else "Розыгрыш"
     parts = [
         f"<b>{title}</b>",
@@ -40,6 +46,8 @@ def render_giveaway_post(giveaway: Giveaway, settings: Settings, *, closed: bool
     ]
     if giveaway.terms_text:
         parts.extend(["", "<b>Условия участия</b>", html.escape(giveaway.terms_text)])
+    if participants_count is not None:
+        parts.extend(["", f"<b>Участников:</b> {participants_count}"])
     parts.extend(
         [
             "",
