@@ -10,6 +10,7 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from tg_drop_bot.db.models import Giveaway, KnownGroup
+from tg_drop_bot.services.conditions import CHANNEL_SUBSCRIPTION_CONDITION
 from tg_drop_bot.services.rendering import giveaway_status_label
 
 CHANNEL_REQUEST_ID = 1
@@ -64,6 +65,19 @@ def draft_image_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def draft_conditions_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Подписчики канала",
+                    callback_data=f"draft:condition:{CHANNEL_SUBSCRIPTION_CONDITION}",
+                )
+            ]
+        ]
+    )
+
+
 def draft_preview_keyboard(giveaway_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -93,23 +107,27 @@ def giveaway_list_keyboard(giveaways: list[Giveaway]) -> InlineKeyboardMarkup:
 def giveaway_card_keyboard(giveaway: Giveaway) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = [
         [
-            InlineKeyboardButton(text="CSV", callback_data=f"giveaway:csv:{giveaway.id}"),
-            InlineKeyboardButton(text="Текст", callback_data=f"giveaway:edit_text:{giveaway.id}"),
-        ],
-        [
             InlineKeyboardButton(
-                text="Условия", callback_data=f"giveaway:edit_terms:{giveaway.id}"
+                text="Список участников", callback_data=f"giveaway:csv:{giveaway.id}"
             ),
             InlineKeyboardButton(
-                text="Дедлайн", callback_data=f"giveaway:edit_deadline:{giveaway.id}"
+                text="Изменить текст", callback_data=f"giveaway:edit_text:{giveaway.id}"
             ),
         ],
         [
             InlineKeyboardButton(
-                text="Победители", callback_data=f"giveaway:edit_winners:{giveaway.id}"
+                text="Условие участия", callback_data=f"giveaway:edit_terms:{giveaway.id}"
             ),
             InlineKeyboardButton(
-                text="Картинка", callback_data=f"giveaway:edit_image:{giveaway.id}"
+                text="Дата завершения", callback_data=f"giveaway:edit_deadline:{giveaway.id}"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="Кол-во победителей", callback_data=f"giveaway:edit_winners:{giveaway.id}"
+            ),
+            InlineKeyboardButton(
+                text="Изменить картинку", callback_data=f"giveaway:edit_image:{giveaway.id}"
             ),
         ],
     ]
@@ -117,7 +135,7 @@ def giveaway_card_keyboard(giveaway: Giveaway) -> InlineKeyboardMarkup:
         rows.append(
             [
                 InlineKeyboardButton(
-                    text="Отменить", callback_data=f"giveaway:cancel:{giveaway.id}"
+                    text="Отменить розыгрыш", callback_data=f"giveaway:cancel:{giveaway.id}"
                 ),
                 InlineKeyboardButton(
                     text="Завершить сейчас", callback_data=f"giveaway:finish:{giveaway.id}"

@@ -14,6 +14,7 @@ from tg_drop_bot.bot.keyboards import (
     admin_main_keyboard,
     channel_request_keyboard,
     confirm_keyboard,
+    draft_conditions_keyboard,
     draft_image_keyboard,
     draft_preview_keyboard,
     giveaway_card_keyboard,
@@ -23,6 +24,7 @@ from tg_drop_bot.bot.keyboards import (
 from tg_drop_bot.bot.states import DraftStates, EditStates
 from tg_drop_bot.config import Settings
 from tg_drop_bot.services.access import can_manage_giveaway, is_admin
+from tg_drop_bot.services.conditions import CHANNEL_SUBSCRIPTION_CONDITION, condition_label
 from tg_drop_bot.services.dates import parse_admin_deadline
 from tg_drop_bot.services.giveaways import (
     add_audit,
@@ -97,28 +99,39 @@ async def draft_post_text(message: Message, state: FSMContext, session: AsyncSes
     giveaway.post_text = message.text.strip()
     await session.commit()
     await state.set_state(DraftStates.terms_text)
-    await message.answer("Введите условия участия.")
+    await message.answer("Выберите условие участия.", reply_markup=draft_conditions_keyboard())
 
 
 @router.message(DraftStates.terms_text)
-async def draft_terms_text(message: Message, state: FSMContext, session: AsyncSession) -> None:
+async def draft_terms_text(message: Message) -> None:
+    await message.answer("Выберите условие кнопкой.", reply_markup=draft_conditions_keyboard())
+
+
+@router.callback_query(
+    DraftStates.terms_text,
+    F.data == f"draft:condition:{CHANNEL_SUBSCRIPTION_CONDITION}",
+)
+async def draft_condition_selected(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
     data = await state.get_data()
     giveaway = await get_giveaway(session, data["giveaway_id"])
-    if giveaway is None or not message.text:
-        await message.answer("Введите условия текстом.")
+    if giveaway is None:
+        await callback.answer("Черновик не найден.", show_alert=True)
         return
-    giveaway.terms_text = message.text.strip()
+    giveaway.terms_text = condition_label(CHANNEL_SUBSCRIPTION_CONDITION)
     await session.commit()
-    await state.set_state(DraftStates.image)
-    await message.answer(
-        "Отправьте картинку для поста или пропустите шаг.", reply_markup=draft_image_keyboard()
-    )
+    await state.set_state(DraftStates.winners_count)
+    await callback.message.answer("Сколько победителей выбрать?")
+    await callback.answer()
 
 
 @router.callback_query(DraftStates.image, F.data == "draft:image:skip")
 async def draft_image_skip(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(DraftStates.winners_count)
-    await callback.message.answer("Сколько победителей выбрать?")
+    await state.set_state(DraftStates.deadline)
+    await callback.message.answer(
+        "Введите дедлайн в формате ДД.ММ.ГГГГ ЧЧ:ММ, например 25.06.2026 18:30."
+    )
     await callback.answer()
 
 
@@ -134,8 +147,10 @@ async def draft_image(message: Message, state: FSMContext, session: AsyncSession
         return
     giveaway.image_file_id = message.photo[-1].file_id
     await session.commit()
-    await state.set_state(DraftStates.winners_count)
-    await message.answer("Сколько победителей выбрать?")
+    await state.set_state(DraftStates.deadline)
+    await message.answer(
+        "Введите дедлайн в формате ДД.ММ.ГГГГ ЧЧ:ММ, например 25.06.2026 18:30."
+    )
 
 
 @router.message(DraftStates.winners_count)
@@ -154,8 +169,10 @@ async def draft_winners_count(message: Message, state: FSMContext, session: Asyn
         return
     giveaway.winners_count = count
     await session.commit()
-    await state.set_state(DraftStates.deadline)
-    await message.answer("Введите дедлайн в формате ДД.ММ.ГГГГ ЧЧ:ММ, например 25.06.2026 18:30.")
+    await state.set_state(DraftStates.image)
+    await message.answer(
+        "Отправьте картинку для поста или пропустите шаг.", reply_markup=draft_image_keyboard()
+    )
 
 
 @router.message(DraftStates.deadline)
@@ -382,7 +399,7 @@ async def edit_field_start(
     await state.update_data(giveaway_id=giveaway.id)
     prompts = {
         "text": ("Введите новый текст поста.", EditStates.text),
-        "terms": ("Введите новые условия.", EditStates.terms),
+        "terms": ("Выберите новое условие участия.", EditStates.terms),
         "deadline": ("Введите новый дедлайн в формате ДД.ММ.ГГГГ ЧЧ:ММ.", EditStates.deadline),
         "winners": ("Введите новое количество победителей.", EditStates.winners),
         "image": ("Отправьте новую картинку.", EditStates.image),
@@ -394,7 +411,10 @@ async def edit_field_start(
         return
     prompt, next_state = prompts[field]
     await state.set_state(next_state)
-    await callback.message.answer(prompt)
+    if next_state == EditStates.terms:
+        await callback.message.answer(prompt, reply_markup=draft_conditions_keyboard())
+    else:
+        await callback.message.answer(prompt)
     await callback.answer()
 
 
@@ -407,11 +427,32 @@ async def edit_text(
 
 @router.message(EditStates.terms)
 async def edit_terms(
-    message: Message, state: FSMContext, session: AsyncSession, settings: Settings, bot: Bot
+    message: Message,
 ) -> None:
+    await message.answer("Выберите условие кнопкой.", reply_markup=draft_conditions_keyboard())
+
+
+@router.callback_query(
+    EditStates.terms,
+    F.data == f"draft:condition:{CHANNEL_SUBSCRIPTION_CONDITION}",
+)
+async def edit_terms_selected(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession, settings: Settings, bot: Bot
+) -> None:
+    if not isinstance(callback.message, Message):
+        await callback.answer("Сообщение не найдено.", show_alert=True)
+        return
     await update_text_field(
-        message, state, session, settings, bot, "terms_text", message.text or ""
+        callback.message,
+        state,
+        session,
+        settings,
+        bot,
+        "terms_text",
+        condition_label(CHANNEL_SUBSCRIPTION_CONDITION),
+        actor_user_id=callback.from_user.id,
     )
+    await callback.answer()
 
 
 async def update_text_field(
@@ -422,13 +463,21 @@ async def update_text_field(
     bot: Bot,
     field: str,
     value: str,
+    *,
+    actor_user_id: int | None = None,
 ) -> None:
     data = await state.get_data()
     giveaway = await get_giveaway(session, data["giveaway_id"])
+    if actor_user_id is None:
+        if message.from_user is None:
+            await message.answer("Нет доступа.")
+            return
+        manager_user_id = message.from_user.id
+    else:
+        manager_user_id = actor_user_id
     if (
         giveaway is None
-        or message.from_user is None
-        or not can_manage_giveaway(message.from_user.id, giveaway, settings)
+        or not can_manage_giveaway(manager_user_id, giveaway, settings)
     ):
         await message.answer("Нет доступа.")
         return
@@ -438,7 +487,7 @@ async def update_text_field(
         session,
         f"giveaway.edited.{field}",
         giveaway_id=giveaway.id,
-        actor_user_id=message.from_user.id,
+        actor_user_id=manager_user_id,
     )
     await session.commit()
     await state.clear()

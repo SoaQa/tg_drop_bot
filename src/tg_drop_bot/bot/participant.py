@@ -14,8 +14,8 @@ from tg_drop_bot.config import Settings
 from tg_drop_bot.db.models import CaptchaChallenge
 from tg_drop_bot.services.access import is_admin
 from tg_drop_bot.services.captcha import create_captcha_challenge, verify_captcha_answer
+from tg_drop_bot.services.conditions import check_participant_conditions
 from tg_drop_bot.services.giveaways import get_giveaway, register_participant
-from tg_drop_bot.services.telegram import is_group_member
 
 router = Router(name="participant")
 
@@ -71,11 +71,9 @@ async def start_captcha_flow(
         await message.answer("Этот розыгрыш сейчас недоступен.")
         return
 
-    is_member, _status = await is_group_member(
-        bot, giveaway.group.telegram_chat_id, message.from_user.id
-    )
-    if not is_member:
-        await message.answer("Участвовать могут только подписчики канала розыгрыша.")
+    condition_check = await check_participant_conditions(bot, giveaway, message.from_user.id)
+    if not condition_check.ok:
+        await message.answer(condition_check.user_message or "Условия участия не выполнены.")
         return
 
     participant, created = await register_participant_if_already_solved(

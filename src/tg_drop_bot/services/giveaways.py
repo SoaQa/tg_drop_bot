@@ -13,9 +13,9 @@ from sqlalchemy.orm import selectinload
 from tg_drop_bot.bot.keyboards import participation_keyboard
 from tg_drop_bot.config import Settings
 from tg_drop_bot.db.models import AuditLog, Giveaway, KnownGroup, Participant, Winner
+from tg_drop_bot.services.conditions import check_participant_conditions
 from tg_drop_bot.services.dates import utc_now
 from tg_drop_bot.services.rendering import mention_participant, render_giveaway_post
-from tg_drop_bot.services.telegram import is_group_member
 
 
 async def add_audit(
@@ -336,12 +336,10 @@ async def finish_giveaway(
     valid_participants: list[Participant] = []
     now = utc_now()
     for participant in participants:
-        is_member, status = await is_group_member(
-            bot, giveaway.group.telegram_chat_id, participant.user_id
-        )
-        participant.membership_status = status if is_member else status
+        condition_check = await check_participant_conditions(bot, giveaway, participant.user_id)
+        participant.membership_status = condition_check.membership_status
         participant.membership_checked_at = now
-        if is_member:
+        if condition_check.ok:
             valid_participants.append(participant)
 
     selected = pick_winners(valid_participants, giveaway.winners_count or 0)
