@@ -99,6 +99,27 @@ async def get_blocking_captcha_challenge(
     return result.scalar_one_or_none()
 
 
+async def get_latest_pending_captcha_challenge(
+    session: AsyncSession,
+    user_id: int,
+) -> CaptchaChallenge | None:
+    result = await session.execute(
+        select(CaptchaChallenge)
+        .where(
+            CaptchaChallenge.user_id == user_id,
+            CaptchaChallenge.status == "pending",
+        )
+        .order_by(CaptchaChallenge.created_at.desc(), CaptchaChallenge.id.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+def looks_like_captcha_answer(text: str) -> bool:
+    normalized = text.strip()
+    return 3 <= len(normalized) <= 16 and normalized.isascii() and normalized.isalnum()
+
+
 async def verify_captcha_answer(
     session: AsyncSession,
     settings: Settings,

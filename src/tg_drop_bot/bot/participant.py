@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 
 from aiogram import Bot, F, Router
-from aiogram.filters import CommandObject, CommandStart
+from aiogram.filters import CommandObject, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import BufferedInputFile, CallbackQuery, Message, User
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +16,8 @@ from tg_drop_bot.services.access import is_admin
 from tg_drop_bot.services.captcha import (
     create_captcha_challenge,
     get_blocking_captcha_challenge,
+    get_latest_pending_captcha_challenge,
+    looks_like_captcha_answer,
     verify_captcha_answer,
 )
 from tg_drop_bot.services.conditions import check_participant_conditions
@@ -181,8 +183,42 @@ async def captcha_answer(
         await message.answer("Введите код текстом.")
         return
     data = await state.get_data()
-    challenge = await session.get(CaptchaChallenge, data["challenge_id"])
-    giveaway = await get_giveaway(session, data["giveaway_id"])
+    challenge_id = data.get("challenge_id")
+    if challenge_id is None:
+        challenge = await get_latest_pending_captcha_challenge(session, message.from_user.id)
+    else:
+        challenge = await session.get(CaptchaChallenge, challenge_id)
+    await process_captcha_answer(message, state, session, settings, challenge)
+
+
+@router.message(StateFilter(None), F.chat.type == "private", F.text.regexp(r"^[A-Za-z0-9]{3,16}$"))
+async def captcha_answer_without_state(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession,
+    settings: Settings,
+) -> None:
+    if message.from_user is None or not message.text:
+        return
+    if not looks_like_captcha_answer(message.text):
+        return
+    challenge = await get_latest_pending_captcha_challenge(session, message.from_user.id)
+    if challenge is None:
+        return
+    await process_captcha_answer(message, state, session, settings, challenge)
+
+
+async def process_captcha_answer(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession,
+    settings: Settings,
+    challenge: CaptchaChallenge | None,
+) -> None:
+    if message.from_user is None or not message.text:
+        await message.answer("Введите код текстом.")
+        return
+    giveaway = await get_giveaway(session, challenge.giveaway_id) if challenge else None
     if challenge is None or giveaway is None or giveaway.status != "published":
         await state.clear()
         await message.answer("Проверка устарела. Нажмите кнопку участия еще раз.")

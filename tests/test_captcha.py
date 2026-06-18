@@ -8,6 +8,7 @@ from tg_drop_bot.services.captcha import (
     generate_captcha_code,
     hash_captcha_answer,
     is_blocking_captcha_challenge,
+    looks_like_captcha_answer,
     render_captcha_png,
     verify_captcha_answer,
 )
@@ -23,6 +24,15 @@ def test_captcha_code_uses_safe_alphabet() -> None:
 def test_captcha_png_is_generated() -> None:
     png = render_captcha_png("ABCDE")
     assert png.startswith(b"\x89PNG")
+
+
+def test_captcha_answer_candidate_uses_short_ascii_alnum_text() -> None:
+    assert looks_like_captcha_answer("3dh4p")
+    assert looks_like_captcha_answer(" ABCDE ")
+    assert not looks_like_captcha_answer("/start")
+    assert not looks_like_captcha_answer("Создать розыгрыш")
+    assert not looks_like_captcha_answer("ab")
+    assert not looks_like_captcha_answer("a" * 17)
 
 
 def test_pending_captcha_blocks_repeated_start() -> None:
