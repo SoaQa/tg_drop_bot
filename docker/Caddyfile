@@ -1,0 +1,8 @@
+{$WEBHOOK_URL} {
+	encode gzip
+
+	@health path /healthz
+	respond @health "ok" 200
+
+	reverse_proxy bot:8080
+}
