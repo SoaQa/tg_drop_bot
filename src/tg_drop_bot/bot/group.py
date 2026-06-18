@@ -12,7 +12,7 @@ router = Router(name="group")
 
 @router.my_chat_member()
 async def bot_membership_changed(event: ChatMemberUpdated, session: AsyncSession) -> None:
-    if event.chat.type not in {"group", "supergroup"}:
+    if event.chat.type != "channel":
         return
     status = event.new_chat_member.status
     is_active = status not in {ChatMemberStatus.LEFT, ChatMemberStatus.KICKED}

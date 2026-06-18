@@ -10,14 +10,14 @@ from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tg_drop_bot.bot.keyboards import (
-    GROUP_REQUEST_ID,
+    CHANNEL_REQUEST_ID,
     admin_main_keyboard,
+    channel_request_keyboard,
     confirm_keyboard,
     draft_image_keyboard,
     draft_preview_keyboard,
     giveaway_card_keyboard,
     giveaway_list_keyboard,
-    group_request_keyboard,
     groups_keyboard,
 )
 from tg_drop_bot.bot.states import DraftStates, EditStates
@@ -58,16 +58,16 @@ async def create_giveaway(
     groups = await list_available_groups(session)
     if not groups:
         await message.answer(
-            "Пока нет доступных групп. Нажмите «Выбрать группу» и выберите группу, "
+            "Пока нет доступных каналов. Нажмите «Выбрать канал» и выберите канал, "
             "где бот добавлен администратором.",
-            reply_markup=group_request_keyboard(),
+            reply_markup=channel_request_keyboard(),
         )
         return
     draft = await create_draft(session, message.from_user.id)
     await session.commit()
     await state.set_state(DraftStates.choosing_group)
     await state.update_data(giveaway_id=draft.id)
-    await message.answer("Выберите группу для розыгрыша.", reply_markup=groups_keyboard(groups))
+    await message.answer("Выберите канал для розыгрыша.", reply_markup=groups_keyboard(groups))
 
 
 @router.callback_query(DraftStates.choosing_group, F.data.startswith("draft:group:"))
@@ -267,27 +267,27 @@ async def list_giveaways(message: Message, session: AsyncSession, settings: Sett
     await message.answer("Выберите розыгрыш.", reply_markup=giveaway_list_keyboard(giveaways))
 
 
-@router.message(StateFilter(None), F.chat.type == "private", F.text == "Группы")
-async def show_groups(message: Message, session: AsyncSession, settings: Settings) -> None:
+@router.message(StateFilter(None), F.chat.type == "private", F.text.in_({"Каналы", "Группы"}))
+async def show_channels(message: Message, session: AsyncSession, settings: Settings) -> None:
     if not admin_only(message, settings):
         return
     groups = await list_available_groups(session)
     if not groups:
         await message.answer(
-            "Доступных групп пока нет. Нажмите «Выбрать группу» и выберите группу, "
+            "Доступных каналов пока нет. Нажмите «Выбрать канал» и выберите канал, "
             "где бот добавлен администратором.",
-            reply_markup=group_request_keyboard(),
+            reply_markup=channel_request_keyboard(),
         )
         return
     text = "\n".join(f"- {group.title} ({group.telegram_chat_id})" for group in groups)
     await message.answer(
-        text + "\n\nЧтобы добавить еще одну группу, нажмите «Выбрать группу».",
-        reply_markup=group_request_keyboard(),
+        text + "\n\nЧтобы добавить еще один канал, нажмите «Выбрать канал».",
+        reply_markup=channel_request_keyboard(),
     )
 
 
 @router.message(StateFilter(None), F.chat.type == "private", F.chat_shared)
-async def register_shared_group(
+async def register_shared_channel(
     message: Message,
     session: AsyncSession,
     settings: Settings,
@@ -295,7 +295,7 @@ async def register_shared_group(
 ) -> None:
     if not admin_only(message, settings) or message.chat_shared is None:
         return
-    if message.chat_shared.request_id != GROUP_REQUEST_ID:
+    if message.chat_shared.request_id != CHANNEL_REQUEST_ID:
         return
 
     chat_id = message.chat_shared.chat_id
@@ -305,24 +305,24 @@ async def register_shared_group(
         bot_member = await bot.get_chat_member(chat_id, me.id)
     except TelegramAPIError:
         await message.answer(
-            "Не удалось проверить группу. Убедитесь, что бот добавлен в группу "
+            "Не удалось проверить канал. Убедитесь, что бот добавлен в канал "
             "администратором, и попробуйте еще раз.",
-            reply_markup=group_request_keyboard(),
+            reply_markup=channel_request_keyboard(),
         )
         return
 
-    if chat.type not in {"group", "supergroup"}:
+    if chat.type != "channel":
         await message.answer(
-            "Можно добавлять только группы.", reply_markup=group_request_keyboard()
+            "Можно добавлять только каналы.", reply_markup=channel_request_keyboard()
         )
         return
 
     bot_is_admin = bot_member.status == ChatMemberStatus.ADMINISTRATOR
     if not bot_is_admin:
         await message.answer(
-            "Бот найден в группе, но не является администратором. "
-            "Выдайте ему права администратора и выберите группу еще раз.",
-            reply_markup=group_request_keyboard(),
+            "Бот найден в канале, но не является администратором. "
+            "Выдайте ему права администратора и выберите канал еще раз.",
+            reply_markup=channel_request_keyboard(),
         )
         return
 
@@ -336,7 +336,7 @@ async def register_shared_group(
     )
     await session.commit()
     await message.answer(
-        f"Группа добавлена: {group.title}. Теперь ее можно выбрать при создании розыгрыша.",
+        f"Канал добавлен: {group.title}. Теперь его можно выбрать при создании розыгрыша.",
         reply_markup=admin_main_keyboard(),
     )
 

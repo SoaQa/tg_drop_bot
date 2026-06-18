@@ -120,7 +120,7 @@ async def list_giveaways_by_status(
 def validate_draft(giveaway: Giveaway) -> list[str]:
     missing: list[str] = []
     if giveaway.group_id is None:
-        missing.append("группа")
+        missing.append("канал")
     if not giveaway.post_text:
         missing.append("текст")
     if not giveaway.terms_text:
@@ -142,7 +142,7 @@ async def publish_giveaway(
     if giveaway.group is None:
         await session.refresh(giveaway, attribute_names=["group"])
     if giveaway.group is None:
-        raise RuntimeError("Giveaway group is not selected")
+        raise RuntimeError("Giveaway channel is not selected")
     missing = validate_draft(giveaway)
     if missing:
         raise RuntimeError("Draft is incomplete: " + ", ".join(missing))

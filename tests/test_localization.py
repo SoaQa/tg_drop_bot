@@ -13,7 +13,7 @@ def test_giveaway_statuses_have_russian_labels() -> None:
 
 def test_membership_statuses_have_russian_labels() -> None:
     assert membership_status_label("member") == "участник"
-    assert membership_status_label("left") == "не состоит в группе"
+    assert membership_status_label("left") == "не подписан на канал"
     assert membership_status_label("check_failed") == "проверка не удалась"
 
 

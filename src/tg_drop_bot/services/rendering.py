@@ -14,11 +14,11 @@ GIVEAWAY_STATUS_LABELS = {
 }
 
 MEMBERSHIP_STATUS_LABELS = {
-    "creator": "создатель группы",
+    "creator": "создатель канала",
     "administrator": "администратор",
     "member": "участник",
     "restricted": "ограничен",
-    "left": "не состоит в группе",
+    "left": "не подписан на канал",
     "kicked": "исключен",
     "check_failed": "проверка не удалась",
 }
@@ -55,12 +55,12 @@ def render_giveaway_post(giveaway: Giveaway, settings: Settings, *, closed: bool
 
 
 def render_giveaway_card(giveaway: Giveaway, settings: Settings, participants_count: int) -> str:
-    group_name = giveaway.group.title if giveaway.group else "не выбрана"
+    group_name = giveaway.group.title if giveaway.group else "не выбран"
     return "\n".join(
         [
             f"<b>Розыгрыш #{giveaway.id}</b>",
             f"Статус: <b>{html.escape(giveaway_status_label(giveaway.status))}</b>",
-            f"Группа: {html.escape(group_name)}",
+            f"Канал: {html.escape(group_name)}",
             f"Дедлайн: {format_admin_datetime(giveaway.deadline_at, settings.timezone)}",
             f"Участников: {participants_count}",
             f"Победителей: {giveaway.winners_count or 0}",

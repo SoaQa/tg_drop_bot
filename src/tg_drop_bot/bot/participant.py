@@ -53,7 +53,7 @@ async def start_message(
     if message.from_user and is_admin(message.from_user.id, settings):
         await message.answer("Админка открыта.", reply_markup=admin_main_keyboard())
     else:
-        await message.answer("Чтобы участвовать в розыгрыше, нажмите кнопку под постом в группе.")
+        await message.answer("Чтобы участвовать в розыгрыше, нажмите кнопку под постом в канале.")
 
 
 async def start_captcha_flow(
@@ -75,7 +75,7 @@ async def start_captcha_flow(
         bot, giveaway.group.telegram_chat_id, message.from_user.id
     )
     if not is_member:
-        await message.answer("Участвовать могут только участники группы розыгрыша.")
+        await message.answer("Участвовать могут только подписчики канала розыгрыша.")
         return
 
     participant, created = await register_participant_if_already_solved(

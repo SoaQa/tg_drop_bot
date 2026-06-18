@@ -68,7 +68,11 @@ async def run_bot() -> None:
     setup_application(app, dispatcher, bot=bot)
 
     async def on_startup(_app: web.Application) -> None:
-        await bot.set_webhook(settings.full_webhook_url, secret_token=settings.webhook_secret)
+        await bot.set_webhook(
+            settings.full_webhook_url,
+            secret_token=settings.webhook_secret,
+            allowed_updates=dispatcher.resolve_used_update_types(),
+        )
         scheduler.start()
 
     async def on_cleanup(_app: web.Application) -> None:

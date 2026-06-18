@@ -12,7 +12,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from tg_drop_bot.db.models import Giveaway, KnownGroup
 from tg_drop_bot.services.rendering import giveaway_status_label
 
-GROUP_REQUEST_ID = 1
+CHANNEL_REQUEST_ID = 1
 
 
 def admin_main_keyboard() -> ReplyKeyboardMarkup:
@@ -21,28 +21,28 @@ def admin_main_keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="Создать розыгрыш")],
             [KeyboardButton(text="Активные"), KeyboardButton(text="Черновики")],
             [KeyboardButton(text="Завершенные"), KeyboardButton(text="Отмененные")],
-            [KeyboardButton(text="Группы")],
+            [KeyboardButton(text="Каналы")],
         ],
         resize_keyboard=True,
     )
 
 
-def group_request_keyboard() -> ReplyKeyboardMarkup:
+def channel_request_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [
                 KeyboardButton(
-                    text="Выбрать группу",
+                    text="Выбрать канал",
                     request_chat=KeyboardButtonRequestChat(
-                        request_id=GROUP_REQUEST_ID,
-                        chat_is_channel=False,
+                        request_id=CHANNEL_REQUEST_ID,
+                        chat_is_channel=True,
                         bot_is_member=True,
                         request_title=True,
                         request_username=True,
                     ),
                 )
             ],
-            [KeyboardButton(text="Создать розыгрыш"), KeyboardButton(text="Группы")],
+            [KeyboardButton(text="Создать розыгрыш"), KeyboardButton(text="Каналы")],
         ],
         resize_keyboard=True,
     )

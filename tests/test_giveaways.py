@@ -8,7 +8,7 @@ from tg_drop_bot.services.giveaways import pick_winners, validate_draft
 def test_validate_draft_reports_missing_fields() -> None:
     giveaway = Giveaway(creator_user_id=1)
     assert validate_draft(giveaway) == [
-        "группа",
+        "канал",
         "текст",
         "условия",
         "количество победителей",
