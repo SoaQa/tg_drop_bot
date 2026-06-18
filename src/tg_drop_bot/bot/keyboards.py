@@ -98,7 +98,8 @@ def draft_preview_keyboard(giveaway_id: int) -> InlineKeyboardMarkup:
 def giveaway_list_keyboard(giveaways: list[Giveaway]) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for giveaway in giveaways:
-        label = f"#{giveaway.id} - {giveaway_status_label(giveaway.status)}"
+        title = giveaway.title or "без названия"
+        label = f"#{giveaway.id} - {title} - {giveaway_status_label(giveaway.status)}"
         builder.button(text=label, callback_data=f"giveaway:view:{giveaway.id}")
     builder.adjust(1)
     return builder.as_markup()
@@ -111,21 +112,26 @@ def giveaway_card_keyboard(giveaway: Giveaway) -> InlineKeyboardMarkup:
                 text="Список участников", callback_data=f"giveaway:csv:{giveaway.id}"
             ),
             InlineKeyboardButton(
-                text="Изменить текст", callback_data=f"giveaway:edit_text:{giveaway.id}"
+                text="Название", callback_data=f"giveaway:edit_title:{giveaway.id}"
             ),
         ],
         [
             InlineKeyboardButton(
-                text="Условие участия", callback_data=f"giveaway:edit_terms:{giveaway.id}"
+                text="Описание", callback_data=f"giveaway:edit_text:{giveaway.id}"
             ),
             InlineKeyboardButton(
-                text="Дата завершения", callback_data=f"giveaway:edit_deadline:{giveaway.id}"
+                text="Условие участия", callback_data=f"giveaway:edit_terms:{giveaway.id}"
             ),
         ],
         [
             InlineKeyboardButton(
                 text="Кол-во победителей", callback_data=f"giveaway:edit_winners:{giveaway.id}"
             ),
+            InlineKeyboardButton(
+                text="Дата завершения", callback_data=f"giveaway:edit_deadline:{giveaway.id}"
+            ),
+        ],
+        [
             InlineKeyboardButton(
                 text="Изменить картинку", callback_data=f"giveaway:edit_image:{giveaway.id}"
             ),
@@ -156,7 +162,8 @@ def giveaway_card_keyboard(giveaway: Giveaway) -> InlineKeyboardMarkup:
 def active_giveaways_keyboard(giveaways: list[Giveaway]) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for giveaway in giveaways:
-        label = f"Участвовать в розыгрыше #{giveaway.id}"
+        title = giveaway.title or f"Розыгрыш #{giveaway.id}"
+        label = f"Участвовать: {title}"
         if giveaway.group is not None:
             label = f"{label} - {giveaway.group.title}"
         rows.append(
@@ -168,6 +175,19 @@ def active_giveaways_keyboard(giveaways: list[Giveaway]) -> InlineKeyboardMarkup
             ]
         )
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def captcha_keyboard(challenge_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Обновить капчу",
+                    callback_data=f"captcha:refresh:{challenge_id}",
+                )
+            ]
+        ]
+    )
 
 
 def confirm_keyboard(action: str, giveaway_id: int) -> InlineKeyboardMarkup:

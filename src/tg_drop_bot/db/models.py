@@ -53,6 +53,7 @@ class Giveaway(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(32), default="draft", index=True, nullable=False)
     creator_user_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
     group_id: Mapped[int | None] = mapped_column(ForeignKey("known_groups.id"), nullable=True)
+    title: Mapped[str | None] = mapped_column(String(255), nullable=True)
     post_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     terms_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     image_file_id: Mapped[str | None] = mapped_column(String(512), nullable=True)

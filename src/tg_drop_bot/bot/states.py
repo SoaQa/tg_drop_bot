@@ -3,6 +3,7 @@ from aiogram.fsm.state import State, StatesGroup
 
 class DraftStates(StatesGroup):
     choosing_group = State()
+    title = State()
     post_text = State()
     terms_text = State()
     image = State()
@@ -11,6 +12,7 @@ class DraftStates(StatesGroup):
 
 
 class EditStates(StatesGroup):
+    title = State()
     text = State()
     terms = State()
     deadline = State()

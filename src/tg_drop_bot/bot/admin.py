@@ -84,9 +84,22 @@ async def draft_group_selected(
         return
     giveaway.group_id = group_id
     await session.commit()
-    await state.set_state(DraftStates.post_text)
-    await callback.message.answer("Введите текст поста розыгрыша.")
+    await state.set_state(DraftStates.title)
+    await callback.message.answer("Введите название розыгрыша.")
     await callback.answer()
+
+
+@router.message(DraftStates.title)
+async def draft_title(message: Message, state: FSMContext, session: AsyncSession) -> None:
+    data = await state.get_data()
+    giveaway = await get_giveaway(session, data["giveaway_id"])
+    if giveaway is None or not message.text:
+        await message.answer("Введите название сообщением.")
+        return
+    giveaway.title = message.text.strip()
+    await session.commit()
+    await state.set_state(DraftStates.post_text)
+    await message.answer("Введите описание розыгрыша.")
 
 
 @router.message(DraftStates.post_text)
@@ -94,7 +107,7 @@ async def draft_post_text(message: Message, state: FSMContext, session: AsyncSes
     data = await state.get_data()
     giveaway = await get_giveaway(session, data["giveaway_id"])
     if giveaway is None or not message.text:
-        await message.answer("Введите текст сообщением.")
+        await message.answer("Введите описание сообщением.")
         return
     giveaway.post_text = message.text.strip()
     await session.commit()
@@ -398,7 +411,8 @@ async def edit_field_start(
         return
     await state.update_data(giveaway_id=giveaway.id)
     prompts = {
-        "text": ("Введите новый текст поста.", EditStates.text),
+        "title": ("Введите новое название розыгрыша.", EditStates.title),
+        "text": ("Введите новое описание розыгрыша.", EditStates.text),
         "terms": ("Выберите новое условие участия.", EditStates.terms),
         "deadline": ("Введите новый дедлайн в формате ДД.ММ.ГГГГ ЧЧ:ММ.", EditStates.deadline),
         "winners": ("Введите новое количество победителей.", EditStates.winners),
@@ -416,6 +430,13 @@ async def edit_field_start(
     else:
         await callback.message.answer(prompt)
     await callback.answer()
+
+
+@router.message(EditStates.title)
+async def edit_title(
+    message: Message, state: FSMContext, session: AsyncSession, settings: Settings, bot: Bot
+) -> None:
+    await update_text_field(message, state, session, settings, bot, "title", message.text or "")
 
 
 @router.message(EditStates.text)

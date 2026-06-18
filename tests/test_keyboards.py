@@ -1,6 +1,7 @@
 from tg_drop_bot.bot.keyboards import (
     CHANNEL_REQUEST_ID,
     active_giveaways_keyboard,
+    captcha_keyboard,
     channel_request_keyboard,
     draft_conditions_keyboard,
     giveaway_card_keyboard,
@@ -36,7 +37,8 @@ def test_giveaway_card_keyboard_uses_human_friendly_labels() -> None:
 
     assert "Список участников" in labels
     assert "CSV" not in labels
-    assert "Изменить текст" in labels
+    assert "Название" in labels
+    assert "Описание" in labels
     assert "Условие участия" in labels
 
 
@@ -59,8 +61,30 @@ def test_participation_keyboard_uses_direct_deep_link_when_bot_username_known() 
 
 
 def test_active_giveaways_keyboard_uses_private_callback_selection() -> None:
-    keyboard = active_giveaways_keyboard([Giveaway(id=7, creator_user_id=1)])
+    keyboard = active_giveaways_keyboard(
+        [Giveaway(id=7, creator_user_id=1, title="Routerich AX3000")]
+    )
     button = keyboard.inline_keyboard[0][0]
 
-    assert button.text == "Участвовать в розыгрыше #7"
+    assert button.text == "Участвовать: Routerich AX3000"
     assert button.callback_data == "participate:7"
+
+
+def test_giveaway_list_keyboard_uses_title() -> None:
+    from tg_drop_bot.bot.keyboards import giveaway_list_keyboard
+
+    keyboard = giveaway_list_keyboard(
+        [Giveaway(id=7, creator_user_id=1, title="Routerich AX3000", status="published")]
+    )
+    button = keyboard.inline_keyboard[0][0]
+
+    assert "Routerich AX3000" in button.text
+    assert button.callback_data == "giveaway:view:7"
+
+
+def test_captcha_keyboard_has_refresh_button() -> None:
+    keyboard = captcha_keyboard(11)
+    button = keyboard.inline_keyboard[0][0]
+
+    assert button.text == "Обновить капчу"
+    assert button.callback_data == "captcha:refresh:11"

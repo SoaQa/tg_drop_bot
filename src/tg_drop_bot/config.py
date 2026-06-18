@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     captcha_length: int = Field(default=5, alias="CAPTCHA_LENGTH")
     captcha_ttl_seconds: int = Field(default=300, alias="CAPTCHA_TTL_SECONDS")
     captcha_max_attempts: int = Field(default=3, alias="CAPTCHA_MAX_ATTEMPTS")
-    captcha_cooldown_seconds: int = Field(default=300, alias="CAPTCHA_COOLDOWN_SECONDS")
+    captcha_cooldown_seconds: int = Field(default=60, alias="CAPTCHA_COOLDOWN_SECONDS")
 
     scheduler_interval_seconds: int = Field(default=30, alias="SCHEDULER_INTERVAL_SECONDS")
     rate_limit_enabled: bool = Field(default=True, alias="RATE_LIMIT_ENABLED")

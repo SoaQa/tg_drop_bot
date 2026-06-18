@@ -32,6 +32,10 @@ def membership_status_label(status: str) -> str:
     return MEMBERSHIP_STATUS_LABELS.get(status, status)
 
 
+def giveaway_title(giveaway: Giveaway) -> str:
+    return giveaway.title or f"Розыгрыш #{giveaway.id}"
+
+
 def render_giveaway_post(
     giveaway: Giveaway,
     settings: Settings,
@@ -39,11 +43,12 @@ def render_giveaway_post(
     closed: bool = False,
     participants_count: int | None = None,
 ) -> str:
-    title = "Розыгрыш завершен" if closed else "Розыгрыш"
+    title = giveaway_title(giveaway)
     parts = [
-        f"<b>{title}</b>",
-        html.escape(giveaway.post_text or ""),
+        f"<b>{'Розыгрыш завершен: ' if closed else ''}{html.escape(title)}</b>",
     ]
+    if giveaway.post_text and giveaway.post_text.strip() != title.strip():
+        parts.append(html.escape(giveaway.post_text))
     if giveaway.terms_text:
         parts.extend(["", "<b>Условия участия</b>", html.escape(giveaway.terms_text)])
     if participants_count is not None:
@@ -67,8 +72,10 @@ def render_giveaway_card(giveaway: Giveaway, settings: Settings, participants_co
     return "\n".join(
         [
             f"<b>Розыгрыш #{giveaway.id}</b>",
+            f"Название: {html.escape(giveaway_title(giveaway))}",
             f"Статус: <b>{html.escape(giveaway_status_label(giveaway.status))}</b>",
             f"Канал: {html.escape(group_name)}",
+            f"Описание: {html.escape(giveaway.post_text or 'не задано')}",
             f"Дедлайн: {format_admin_datetime(giveaway.deadline_at, settings.timezone)}",
             f"Участников: {participants_count}",
             f"Победителей: {giveaway.winners_count or 0}",

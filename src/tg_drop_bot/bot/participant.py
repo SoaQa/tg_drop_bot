@@ -8,7 +8,11 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import BufferedInputFile, CallbackQuery, Message, User
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tg_drop_bot.bot.keyboards import active_giveaways_keyboard, admin_main_keyboard
+from tg_drop_bot.bot.keyboards import (
+    active_giveaways_keyboard,
+    admin_main_keyboard,
+    captcha_keyboard,
+)
 from tg_drop_bot.bot.states import CaptchaStates
 from tg_drop_bot.config import Settings
 from tg_drop_bot.db.models import CaptchaChallenge
@@ -133,11 +137,14 @@ async def start_captcha_flow(
     )
     if blocking_challenge is not None:
         if blocking_challenge.status == "failed":
-            await message.answer("Слишком много попыток. Попробуйте позже.")
+            await message.answer(
+                "Слишком много попыток. Новую капчу можно получить через 1 минуту."
+            )
         else:
             await message.answer(
                 "Капча уже отправлена. Введите код из последнего сообщения с картинкой "
-                "или нажмите кнопку участия позже."
+                "или обновите капчу.",
+                reply_markup=captcha_keyboard(blocking_challenge.id),
             )
         return
 
@@ -145,11 +152,66 @@ async def start_captcha_flow(
         session, settings, giveaway.id, participant_user.id
     )
     await session.commit()
+    await send_captcha_challenge(message, state, challenge, image_bytes)
+
+
+@router.callback_query(F.data.startswith("captcha:refresh:"))
+async def refresh_captcha_callback(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession,
+    settings: Settings,
+) -> None:
+    assert callback.data is not None
+    if callback.from_user is None or not isinstance(callback.message, Message):
+        await callback.answer("Капча устарела.", show_alert=True)
+        return
+
+    challenge_id = int(callback.data.split(":")[2])
+    challenge = await session.get(CaptchaChallenge, challenge_id)
+    if (
+        challenge is None
+        or challenge.user_id != callback.from_user.id
+        or challenge.status != "pending"
+    ):
+        await callback.answer("Капча устарела. Нажмите кнопку участия еще раз.", show_alert=True)
+        return
+
+    giveaway = await get_giveaway(session, challenge.giveaway_id)
+    if giveaway is None or giveaway.status != "published":
+        await callback.answer("Розыгрыш сейчас недоступен.", show_alert=True)
+        return
+
+    challenge.status = "expired"
+    new_challenge, image_bytes = await create_captcha_challenge(
+        session,
+        settings,
+        challenge.giveaway_id,
+        challenge.user_id,
+    )
+    await session.commit()
     await state.set_state(CaptchaStates.answer)
-    await state.update_data(challenge_id=challenge.id, giveaway_id=giveaway.id)
+    await state.update_data(challenge_id=new_challenge.id, giveaway_id=new_challenge.giveaway_id)
+    await callback.answer("Капча обновлена.")
+    await callback.message.answer_photo(
+        BufferedInputFile(image_bytes, filename="captcha.png"),
+        caption="Введите код с новой картинки. Капча действует несколько минут.",
+        reply_markup=captcha_keyboard(new_challenge.id),
+    )
+
+
+async def send_captcha_challenge(
+    message: Message,
+    state: FSMContext,
+    challenge: CaptchaChallenge,
+    image_bytes: bytes,
+) -> None:
+    await state.set_state(CaptchaStates.answer)
+    await state.update_data(challenge_id=challenge.id, giveaway_id=challenge.giveaway_id)
     await message.answer_photo(
         BufferedInputFile(image_bytes, filename="captcha.png"),
         caption="Введите код с картинки. Капча действует несколько минут.",
+        reply_markup=captcha_keyboard(challenge.id),
     )
 
 
@@ -232,12 +294,14 @@ async def process_captcha_answer(
             await message.answer("Капча истекла. Нажмите кнопку участия еще раз.")
         elif verification.reason == "cooldown":
             await state.clear()
-            await message.answer("Слишком много попыток. Попробуйте позже.")
+            await message.answer(
+                "Слишком много попыток. Новую капчу можно получить через 1 минуту."
+            )
         elif verification.attempts_left > 0:
             await message.answer(f"Код неверный. Осталось попыток: {verification.attempts_left}.")
         else:
             await state.clear()
-            await message.answer("Попытки закончились. Попробуйте позже.")
+            await message.answer("Попытки закончились. Новую капчу можно получить через 1 минуту.")
         return
 
     participant, created = await register_participant(session, giveaway, message.from_user)

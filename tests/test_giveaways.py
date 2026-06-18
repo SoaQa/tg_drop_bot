@@ -9,7 +9,8 @@ def test_validate_draft_reports_missing_fields() -> None:
     giveaway = Giveaway(creator_user_id=1)
     assert validate_draft(giveaway) == [
         "канал",
-        "текст",
+        "название",
+        "описание",
         "условия",
         "количество победителей",
         "дедлайн",

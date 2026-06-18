@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import logging
 import random
 from datetime import UTC
@@ -16,7 +17,7 @@ from tg_drop_bot.config import Settings
 from tg_drop_bot.db.models import AuditLog, Giveaway, KnownGroup, Participant, Winner
 from tg_drop_bot.services.conditions import check_participant_conditions
 from tg_drop_bot.services.dates import utc_now
-from tg_drop_bot.services.rendering import mention_participant, render_giveaway_post
+from tg_drop_bot.services.rendering import giveaway_title, mention_participant, render_giveaway_post
 
 logger = logging.getLogger(__name__)
 
@@ -140,8 +141,10 @@ def validate_draft(giveaway: Giveaway) -> list[str]:
     missing: list[str] = []
     if giveaway.group_id is None:
         missing.append("канал")
+    if not giveaway.title:
+        missing.append("название")
     if not giveaway.post_text:
-        missing.append("текст")
+        missing.append("описание")
     if not giveaway.terms_text:
         missing.append("условия")
     if not giveaway.winners_count:
@@ -433,7 +436,7 @@ async def publish_winner_announcement(
 ) -> None:
     if giveaway.group is None:
         return
-    lines = [f"<b>Итоги розыгрыша #{giveaway.id}</b>"]
+    lines = [f"<b>Итоги розыгрыша: {html.escape(giveaway_title(giveaway))}</b>"]
     if winners:
         lines.append("")
         lines.extend(
