@@ -33,18 +33,20 @@ class RateLimitMiddleware(BaseMiddleware):
             await self._notify_limited(event)
             return None
 
-        if (
-            isinstance(event, CallbackQuery)
-            and event.data
-            and event.data.startswith("participate:")
-        ):
-            participate_result = await limiter.debounce(
-                f"rl:user:{user_id}:participate",
-                settings.rate_limit_participate_seconds,
-            )
-            if not participate_result.allowed:
-                await event.answer("Слишком часто. Попробуйте через несколько секунд.")
-                return None
+        if isinstance(event, CallbackQuery) and event.data:
+            debounced_action = None
+            if event.data.startswith("participate:"):
+                debounced_action = "participate"
+            elif event.data.startswith("captcha:refresh:"):
+                debounced_action = "captcha_refresh"
+            if debounced_action is not None:
+                debounce_result = await limiter.debounce(
+                    f"rl:user:{user_id}:{debounced_action}",
+                    settings.rate_limit_participate_seconds,
+                )
+                if not debounce_result.allowed:
+                    await event.answer("Слишком часто. Попробуйте через несколько секунд.")
+                    return None
 
         return await handler(event, data)
 

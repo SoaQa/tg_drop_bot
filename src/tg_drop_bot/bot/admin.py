@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import contextlib
+import html
+
 # mypy: disable-error-code="union-attr,index"
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatMemberStatus
@@ -20,13 +23,18 @@ from tg_drop_bot.bot.keyboards import (
     draft_preview_keyboard,
     giveaway_card_keyboard,
     giveaway_list_keyboard,
+    parse_callback_int,
 )
 from tg_drop_bot.bot.states import DraftStates, EditStates
 from tg_drop_bot.config import Settings
+from tg_drop_bot.db.models import KnownChannel
 from tg_drop_bot.services.access import can_manage_giveaway, is_admin
 from tg_drop_bot.services.conditions import CHANNEL_SUBSCRIPTION_CONDITION, condition_label
-from tg_drop_bot.services.dates import parse_admin_deadline
+from tg_drop_bot.services.dates import parse_admin_deadline, utc_now
 from tg_drop_bot.services.giveaways import (
+    MESSAGE_TEXT_LIMIT,
+    PHOTO_CAPTION_LIMIT,
+    PublishGiveawayError,
     add_audit,
     build_csv_file,
     cancel_giveaway,
@@ -39,10 +47,15 @@ from tg_drop_bot.services.giveaways import (
     list_giveaways_by_status,
     publish_giveaway,
     replace_published_image,
+    try_status_transition,
     upsert_known_channel,
     validate_draft,
 )
-from tg_drop_bot.services.rendering import render_giveaway_card, render_giveaway_post
+from tg_drop_bot.services.rendering import (
+    channel_post_link,
+    render_giveaway_card,
+    render_giveaway_post,
+)
 
 router = Router(name="admin")
 
@@ -90,7 +103,18 @@ async def create_giveaway(
 async def draft_channel_selected(
     callback: CallbackQuery, state: FSMContext, session: AsyncSession
 ) -> None:
-    channel_id = int(callback.data.split(":")[2])
+    channel_id = parse_callback_int(callback.data, 2)
+    if channel_id is None:
+        await callback.answer("Действие устарело. Выберите канал заново.", show_alert=True)
+        return
+    channel = await session.get(KnownChannel, channel_id)
+    if channel is None or not channel.is_active or not channel.bot_is_admin:
+        await callback.answer(
+            "Канал недоступен. Убедитесь, что бот остается администратором канала, "
+            "и выберите канал заново.",
+            show_alert=True,
+        )
+        return
     data = await state.get_data()
     giveaway = await get_giveaway(session, data["giveaway_id"])
     if giveaway is None:
@@ -214,6 +238,9 @@ async def draft_deadline(
     except ValueError:
         await message.answer("Дата не распознана. Пример: 25.06.2026 18:30.")
         return
+    if deadline <= utc_now():
+        await message.answer("Дедлайн должен быть в будущем.")
+        return
     data = await state.get_data()
     giveaway = await get_giveaway(session, data["giveaway_id"])
     if giveaway is None:
@@ -250,7 +277,10 @@ async def draft_publish(
     if callback.from_user is None or not is_admin(callback.from_user.id, settings):
         await callback.answer("Нет доступа.", show_alert=True)
         return
-    giveaway_id = int(callback.data.split(":")[2])
+    giveaway_id = parse_callback_int(callback.data, 2)
+    if giveaway_id is None:
+        await callback.answer("Действие устарело. Откройте розыгрыш заново.", show_alert=True)
+        return
     giveaway = await get_giveaway(session, giveaway_id)
     if giveaway is None or not can_manage_giveaway(callback.from_user.id, giveaway, settings):
         await callback.answer("Розыгрыш не найден или нет доступа.", show_alert=True)
@@ -259,26 +289,42 @@ async def draft_publish(
     if missing:
         await callback.answer("Черновик не заполнен: " + ", ".join(missing), show_alert=True)
         return
-    await publish_giveaway(session, bot, settings, giveaway, callback.from_user.id)
-    await session.commit()
-    await callback.message.answer("Розыгрыш опубликован.", reply_markup=admin_main_keyboard())
+    try:
+        await publish_giveaway(session, bot, settings, giveaway, callback.from_user.id)
+    except PublishGiveawayError as error:
+        await callback.answer(str(error), show_alert=True)
+        return
+    text = "Розыгрыш опубликован."
+    link = channel_post_link(giveaway.channel, giveaway.message_id)
+    if link:
+        text += f"\nПост: {link}"
+    await callback.message.answer(text, reply_markup=admin_main_keyboard())
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith("draft:delete:"))
 async def draft_delete(callback: CallbackQuery, session: AsyncSession, settings: Settings) -> None:
-    giveaway_id = int(callback.data.split(":")[2])
+    giveaway_id = parse_callback_int(callback.data, 2)
+    if giveaway_id is None:
+        await callback.answer("Действие устарело. Откройте розыгрыш заново.", show_alert=True)
+        return
     giveaway = await get_giveaway(session, giveaway_id)
     if giveaway is None or not can_manage_giveaway(callback.from_user.id, giveaway, settings):
         await callback.answer("Нет доступа.", show_alert=True)
         return
-    giveaway.status = "cancelled"
     await add_audit(
         session,
         "giveaway.draft_deleted",
         giveaway_id=giveaway.id,
         actor_user_id=callback.from_user.id,
     )
+    deleted = await try_status_transition(
+        session, giveaway, expected_status="draft", status="cancelled"
+    )
+    if not deleted:
+        await session.rollback()
+        await callback.answer("Удалить можно только черновик.", show_alert=True)
+        return
     await session.commit()
     await callback.message.answer("Черновик удален.", reply_markup=admin_main_keyboard())
     await callback.answer()
@@ -323,7 +369,9 @@ async def show_channels(message: Message, session: AsyncSession, settings: Setti
             reply_markup=channel_request_keyboard(),
         )
         return
-    text = "\n".join(f"- {channel.title} ({channel.telegram_chat_id})" for channel in channels)
+    text = "\n".join(
+        f"- {html.escape(channel.title)} ({channel.telegram_chat_id})" for channel in channels
+    )
     await message.answer(
         text + "\n\nЧтобы добавить еще один канал, нажмите «Выбрать канал».",
         reply_markup=channel_request_keyboard(),
@@ -380,14 +428,18 @@ async def register_shared_channel(
     )
     await session.commit()
     await message.answer(
-        f"Канал добавлен: {channel.title}. Теперь его можно выбрать при создании розыгрыша.",
+        f"Канал добавлен: {html.escape(channel.title)}. "
+        "Теперь его можно выбрать при создании розыгрыша.",
         reply_markup=admin_main_keyboard(),
     )
 
 
 @router.callback_query(F.data.startswith("giveaway:view:"))
 async def view_giveaway(callback: CallbackQuery, session: AsyncSession, settings: Settings) -> None:
-    giveaway_id = int(callback.data.split(":")[2])
+    giveaway_id = parse_callback_int(callback.data, 2)
+    if giveaway_id is None:
+        await callback.answer("Действие устарело. Откройте розыгрыш заново.", show_alert=True)
+        return
     giveaway = await get_giveaway(session, giveaway_id)
     if giveaway is None or not can_manage_giveaway(callback.from_user.id, giveaway, settings):
         await callback.answer("Нет доступа.", show_alert=True)
@@ -402,7 +454,10 @@ async def view_giveaway(callback: CallbackQuery, session: AsyncSession, settings
 
 @router.callback_query(F.data.startswith("giveaway:csv:"))
 async def export_csv(callback: CallbackQuery, session: AsyncSession, settings: Settings) -> None:
-    giveaway_id = int(callback.data.split(":")[2])
+    giveaway_id = parse_callback_int(callback.data, 2)
+    if giveaway_id is None:
+        await callback.answer("Действие устарело. Откройте розыгрыш заново.", show_alert=True)
+        return
     giveaway = await get_giveaway(session, giveaway_id)
     if giveaway is None or not can_manage_giveaway(callback.from_user.id, giveaway, settings):
         await callback.answer("Нет доступа.", show_alert=True)
@@ -424,6 +479,11 @@ async def edit_field_start(
     giveaway = await get_giveaway(session, giveaway_id)
     if giveaway is None or not can_manage_giveaway(callback.from_user.id, giveaway, settings):
         await callback.answer("Нет доступа.", show_alert=True)
+        return
+    if giveaway.status not in {"draft", "published"}:
+        await callback.answer(
+            "Розыгрыш уже завершен, редактирование недоступно.", show_alert=True
+        )
         return
     await state.update_data(giveaway_id=giveaway.id)
     prompts = {
@@ -522,14 +582,34 @@ async def update_text_field(
     ):
         await message.answer("Нет доступа.")
         return
+    if giveaway.status not in {"draft", "published"}:
+        await state.clear()
+        await message.answer(
+            "Розыгрыш уже завершен, редактирование недоступно.",
+            reply_markup=admin_main_keyboard(),
+        )
+        return
     setattr(giveaway, field, value.strip())
     participants_count = await count_participants(session, giveaway.id)
-    await edit_published_message(
-        bot,
-        settings,
-        giveaway,
-        participants_count=participants_count,
-    )
+    rendered = render_giveaway_post(giveaway, settings, participants_count=participants_count)
+    limit = PHOTO_CAPTION_LIMIT if giveaway.image_file_id else MESSAGE_TEXT_LIMIT
+    if len(rendered) > limit:
+        await session.rollback()
+        await message.answer(
+            f"Слишком длинный текст: пост получится {len(rendered)} символов "
+            f"при лимите {limit}. Сократите текст."
+        )
+        return
+    post_updated = True
+    try:
+        await edit_published_message(
+            bot,
+            settings,
+            giveaway,
+            participants_count=participants_count,
+        )
+    except TelegramAPIError:
+        post_updated = False
     await add_audit(
         session,
         f"giveaway.edited.{field}",
@@ -538,7 +618,14 @@ async def update_text_field(
     )
     await session.commit()
     await state.clear()
-    await message.answer("Обновлено.", reply_markup=admin_main_keyboard())
+    if post_updated:
+        await message.answer("Обновлено.", reply_markup=admin_main_keyboard())
+    else:
+        await message.answer(
+            "Обновлено, но пост в канале обновить не удалось. Проверьте, что бот "
+            "остается администратором канала и пост не удален.",
+            reply_markup=admin_main_keyboard(),
+        )
 
 
 @router.message(EditStates.deadline)
@@ -550,6 +637,9 @@ async def edit_deadline(
     except ValueError:
         await message.answer("Дата не распознана. Пример: 25.06.2026 18:30.")
         return
+    if deadline <= utc_now():
+        await message.answer("Дедлайн должен быть в будущем.")
+        return
     data = await state.get_data()
     giveaway = await get_giveaway(session, data["giveaway_id"])
     if (
@@ -559,14 +649,22 @@ async def edit_deadline(
     ):
         await message.answer("Нет доступа.")
         return
+    if giveaway.status not in {"draft", "published"}:
+        await state.clear()
+        await message.answer(
+            "Розыгрыш уже завершен, редактирование недоступно.",
+            reply_markup=admin_main_keyboard(),
+        )
+        return
     giveaway.deadline_at = deadline
     participants_count = await count_participants(session, giveaway.id)
-    await edit_published_message(
-        bot,
-        settings,
-        giveaway,
-        participants_count=participants_count,
-    )
+    with contextlib.suppress(TelegramAPIError):
+        await edit_published_message(
+            bot,
+            settings,
+            giveaway,
+            participants_count=participants_count,
+        )
     await add_audit(
         session,
         "giveaway.edited.deadline",
@@ -598,14 +696,22 @@ async def edit_winners(
     ):
         await message.answer("Нет доступа.")
         return
+    if giveaway.status not in {"draft", "published"}:
+        await state.clear()
+        await message.answer(
+            "Розыгрыш уже завершен, редактирование недоступно.",
+            reply_markup=admin_main_keyboard(),
+        )
+        return
     giveaway.winners_count = count
     participants_count = await count_participants(session, giveaway.id)
-    await edit_published_message(
-        bot,
-        settings,
-        giveaway,
-        participants_count=participants_count,
-    )
+    with contextlib.suppress(TelegramAPIError):
+        await edit_published_message(
+            bot,
+            settings,
+            giveaway,
+            participants_count=participants_count,
+        )
     await add_audit(
         session,
         "giveaway.edited.winners_count",
@@ -633,14 +739,29 @@ async def edit_image(
     ):
         await message.answer("Нет доступа.")
         return
+    if giveaway.status not in {"draft", "published"}:
+        await state.clear()
+        await message.answer(
+            "Розыгрыш уже завершен, редактирование недоступно.",
+            reply_markup=admin_main_keyboard(),
+        )
+        return
     participants_count = await count_participants(session, giveaway.id)
-    await replace_published_image(
-        bot,
-        settings,
-        giveaway,
-        message.photo[-1].file_id,
-        participants_count=participants_count,
-    )
+    try:
+        await replace_published_image(
+            bot,
+            settings,
+            giveaway,
+            message.photo[-1].file_id,
+            participants_count=participants_count,
+        )
+    except TelegramAPIError:
+        await session.rollback()
+        await message.answer(
+            "Не удалось заменить картинку в посте. Проверьте, что бот остается "
+            "администратором канала, и попробуйте еще раз."
+        )
+        return
     await add_audit(
         session,
         "giveaway.edited.image",
@@ -653,8 +774,17 @@ async def edit_image(
 
 
 @router.callback_query(F.data.startswith("giveaway:cancel:"))
-async def cancel_start(callback: CallbackQuery) -> None:
-    giveaway_id = int(callback.data.split(":")[2])
+async def cancel_start(
+    callback: CallbackQuery, session: AsyncSession, settings: Settings
+) -> None:
+    giveaway_id = parse_callback_int(callback.data, 2)
+    if giveaway_id is None:
+        await callback.answer("Действие устарело. Откройте розыгрыш заново.", show_alert=True)
+        return
+    giveaway = await get_giveaway(session, giveaway_id)
+    if giveaway is None or not can_manage_giveaway(callback.from_user.id, giveaway, settings):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
     await callback.message.answer(
         "Отменить розыгрыш?", reply_markup=confirm_keyboard("cancel", giveaway_id)
     )
@@ -662,8 +792,17 @@ async def cancel_start(callback: CallbackQuery) -> None:
 
 
 @router.callback_query(F.data.startswith("giveaway:finish:"))
-async def finish_start(callback: CallbackQuery) -> None:
-    giveaway_id = int(callback.data.split(":")[2])
+async def finish_start(
+    callback: CallbackQuery, session: AsyncSession, settings: Settings
+) -> None:
+    giveaway_id = parse_callback_int(callback.data, 2)
+    if giveaway_id is None:
+        await callback.answer("Действие устарело. Откройте розыгрыш заново.", show_alert=True)
+        return
+    giveaway = await get_giveaway(session, giveaway_id)
+    if giveaway is None or not can_manage_giveaway(callback.from_user.id, giveaway, settings):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
     await callback.message.answer(
         "Завершить розыгрыш сейчас?", reply_markup=confirm_keyboard("finish", giveaway_id)
     )
@@ -674,13 +813,20 @@ async def finish_start(callback: CallbackQuery) -> None:
 async def cancel_confirm(
     callback: CallbackQuery, session: AsyncSession, settings: Settings, bot: Bot
 ) -> None:
-    giveaway_id = int(callback.data.split(":")[2])
+    giveaway_id = parse_callback_int(callback.data, 2)
+    if giveaway_id is None:
+        await callback.answer("Действие устарело. Откройте розыгрыш заново.", show_alert=True)
+        return
     giveaway = await get_giveaway(session, giveaway_id)
     if giveaway is None or not can_manage_giveaway(callback.from_user.id, giveaway, settings):
         await callback.answer("Нет доступа.", show_alert=True)
         return
-    await cancel_giveaway(session, bot, settings, giveaway, callback.from_user.id)
-    await session.commit()
+    cancelled = await cancel_giveaway(session, bot, settings, giveaway, callback.from_user.id)
+    if not cancelled:
+        await callback.answer(
+            "Не получилось: розыгрыш уже завершен или отменен.", show_alert=True
+        )
+        return
     await callback.message.answer("Розыгрыш отменен.", reply_markup=admin_main_keyboard())
     await callback.answer()
 
@@ -689,12 +835,15 @@ async def cancel_confirm(
 async def finish_confirm(
     callback: CallbackQuery, session: AsyncSession, settings: Settings, bot: Bot
 ) -> None:
-    giveaway_id = int(callback.data.split(":")[2])
+    giveaway_id = parse_callback_int(callback.data, 2)
+    if giveaway_id is None:
+        await callback.answer("Действие устарело. Откройте розыгрыш заново.", show_alert=True)
+        return
     giveaway = await get_giveaway(session, giveaway_id)
     if giveaway is None or not can_manage_giveaway(callback.from_user.id, giveaway, settings):
         await callback.answer("Нет доступа.", show_alert=True)
         return
-    await finish_giveaway(
+    result = await finish_giveaway(
         session,
         bot,
         settings,
@@ -702,6 +851,13 @@ async def finish_confirm(
         actor_user_id=callback.from_user.id,
         manual=True,
     )
-    await session.commit()
-    await callback.message.answer("Розыгрыш завершен.", reply_markup=admin_main_keyboard())
+    if not result.finished:
+        await callback.answer(
+            "Не получилось: розыгрыш уже завершен или отменен.", show_alert=True
+        )
+        return
+    await callback.message.answer(
+        f"Розыгрыш завершен. Победителей: {len(result.winners)}.",
+        reply_markup=admin_main_keyboard(),
+    )
     await callback.answer()

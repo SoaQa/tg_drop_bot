@@ -43,7 +43,7 @@ def test_channels_keyboard_uses_channel_callback() -> None:
 
 
 def test_giveaway_card_keyboard_uses_human_friendly_labels() -> None:
-    keyboard = giveaway_card_keyboard(Giveaway(id=1, creator_user_id=1))
+    keyboard = giveaway_card_keyboard(Giveaway(id=1, creator_user_id=1, status="published"))
     labels = [button.text for row in keyboard.inline_keyboard for button in row]
 
     assert "Список участников" in labels
@@ -51,6 +51,13 @@ def test_giveaway_card_keyboard_uses_human_friendly_labels() -> None:
     assert "Название" in labels
     assert "Описание" in labels
     assert "Условие участия" in labels
+
+
+def test_finished_giveaway_card_keyboard_has_no_edit_buttons() -> None:
+    keyboard = giveaway_card_keyboard(Giveaway(id=1, creator_user_id=1, status="finished"))
+    labels = [button.text for row in keyboard.inline_keyboard for button in row]
+
+    assert labels == ["Список участников"]
 
 
 def test_draft_giveaway_card_keyboard_has_delete_button() -> None:
@@ -99,3 +106,15 @@ def test_captcha_keyboard_has_refresh_button() -> None:
 
     assert button.text == "Обновить капчу"
     assert button.callback_data == "captcha:refresh:11"
+
+
+def test_parse_callback_int_rejects_malformed_data() -> None:
+    from tg_drop_bot.bot.keyboards import parse_callback_int
+
+    assert parse_callback_int("giveaway:view:7", 2) == 7
+    assert parse_callback_int("participate:12", 1) == 12
+    assert parse_callback_int("giveaway:view:oops", 2) is None
+    assert parse_callback_int("giveaway:view:-5", 2) is None
+    assert parse_callback_int("giveaway:view", 2) is None
+    assert parse_callback_int(None, 2) is None
+    assert parse_callback_int("", 0) is None

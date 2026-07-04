@@ -61,6 +61,10 @@ class Giveaway(Base, TimestampMixin):
     deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     result_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # Meaningful only for finished giveaways: pending -> drawn -> announced.
+    results_state: Mapped[str] = mapped_column(
+        String(32), default="announced", server_default="announced", nullable=False
+    )
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

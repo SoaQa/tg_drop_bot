@@ -3,8 +3,12 @@ from __future__ import annotations
 import html
 
 from tg_drop_bot.config import Settings
-from tg_drop_bot.db.models import Giveaway, Participant
+from tg_drop_bot.db.models import Giveaway, KnownChannel, Participant
 from tg_drop_bot.services.dates import format_admin_datetime
+
+# Больше победителей в одном сообщении не показываем, чтобы не упереться
+# в лимит Telegram на 4096 символов.
+MAX_ANNOUNCED_WINNERS = 50
 
 GIVEAWAY_STATUS_LABELS = {
     "draft": "черновик",
@@ -82,6 +86,43 @@ def render_giveaway_card(giveaway: Giveaway, settings: Settings, participants_co
             f"Пост: {giveaway.message_id or 'не опубликован'}",
         ]
     )
+
+
+def render_results_announcement(giveaway: Giveaway, winners: list[Participant]) -> str:
+    lines = [f"<b>Итоги розыгрыша: {html.escape(giveaway_title(giveaway))}</b>"]
+    if winners:
+        lines.append("")
+        lines.extend(
+            f"{index}. {mention_participant(participant)}"
+            for index, participant in enumerate(winners[:MAX_ANNOUNCED_WINNERS], 1)
+        )
+        hidden = len(winners) - MAX_ANNOUNCED_WINNERS
+        if hidden > 0:
+            lines.append(f"...и еще победителей: {hidden}. Полный список - у организатора.")
+        if giveaway.winners_count and len(winners) < giveaway.winners_count:
+            lines.extend(
+                [
+                    "",
+                    "Валидных участников оказалось меньше призовых мест: "
+                    f"разыграно {len(winners)} из {giveaway.winners_count}.",
+                ]
+            )
+        lines.extend(["", "Поздравляем победителей!"])
+    else:
+        lines.extend(["", "Победителей нет: не нашлось валидных участников."])
+    return "\n".join(lines)
+
+
+def channel_post_link(channel: KnownChannel | None, message_id: int | None) -> str | None:
+    """Public or private t.me link to a channel post, if one can be built."""
+    if channel is None or message_id is None:
+        return None
+    if channel.username:
+        return f"https://t.me/{channel.username}/{message_id}"
+    chat_id = str(channel.telegram_chat_id)
+    if chat_id.startswith("-100"):
+        return f"https://t.me/c/{chat_id[4:]}/{message_id}"
+    return None
 
 
 def mention_participant(participant: Participant) -> str:

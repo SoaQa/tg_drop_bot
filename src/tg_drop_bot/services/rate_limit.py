@@ -33,8 +33,9 @@ class RedisRateLimiter:
             return RateLimitResult(True)
         try:
             value = await self.redis.incr(key)
-            if value == 1:
-                await self.redis.expire(key, window_seconds)
+            # nx=True ставит TTL только если его нет: заодно чинит ключи,
+            # потерявшие TTL из-за сбоя между INCR и EXPIRE.
+            await self.redis.expire(key, window_seconds, nx=True)
             if value > limit:
                 return RateLimitResult(False, "rate_limit")
         except RedisError as exc:

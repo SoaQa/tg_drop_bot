@@ -11,7 +11,9 @@ from tg_drop_bot.config import Settings
 from tg_drop_bot.services.giveaways import (
     due_published_giveaways,
     finish_giveaway,
+    get_giveaway,
     refresh_published_giveaway_messages,
+    resume_unfinished_results,
 )
 
 logger = logging.getLogger(__name__)
@@ -28,6 +30,7 @@ class GiveawayScheduler:
         self.session_factory = session_factory
         self.bot = bot
         self._task: asyncio.Task[None] | None = None
+        self._last_rendered_counts: dict[int, int] = {}
 
     def start(self) -> None:
         if self._task is None:
@@ -50,20 +53,52 @@ class GiveawayScheduler:
             await asyncio.sleep(self.settings.scheduler_interval_seconds)
 
     async def tick(self) -> None:
+        await self._refresh_counters()
+        await self._finish_due_giveaways()
+        await self._resume_unfinished_results()
+
+    async def _refresh_counters(self) -> None:
         async with self.session_factory() as session:
             try:
-                await refresh_published_giveaway_messages(session, self.bot, self.settings)
-            except Exception:
-                logger.exception("Giveaway participant counter refresh failed")
-
-            giveaways = await due_published_giveaways(session)
-            for giveaway in giveaways:
-                await finish_giveaway(
+                await refresh_published_giveaway_messages(
                     session,
                     self.bot,
                     self.settings,
-                    giveaway,
-                    actor_user_id=None,
-                    manual=False,
+                    self._last_rendered_counts,
                 )
-            await session.commit()
+            except Exception:
+                logger.exception("Giveaway participant counter refresh failed")
+
+    async def _finish_due_giveaways(self) -> None:
+        async with self.session_factory() as session:
+            due = await due_published_giveaways(session)
+            due_ids = [giveaway.id for giveaway in due]
+
+        # Each giveaway is finished in its own session so a failure in one
+        # cannot roll back or repeat side effects of another.
+        for giveaway_id in due_ids:
+            async with self.session_factory() as session:
+                giveaway = await get_giveaway(session, giveaway_id)
+                if giveaway is None:
+                    continue
+                try:
+                    await finish_giveaway(
+                        session,
+                        self.bot,
+                        self.settings,
+                        giveaway,
+                        actor_user_id=None,
+                        manual=False,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to finish giveaway",
+                        extra={"giveaway_id": giveaway_id},
+                    )
+
+    async def _resume_unfinished_results(self) -> None:
+        async with self.session_factory() as session:
+            try:
+                await resume_unfinished_results(session, self.bot, self.settings)
+            except Exception:
+                logger.exception("Failed to resume unfinished giveaway results")

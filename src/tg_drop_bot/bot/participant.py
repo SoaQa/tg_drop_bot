@@ -12,6 +12,7 @@ from tg_drop_bot.bot.keyboards import (
     active_giveaways_keyboard,
     admin_main_keyboard,
     captcha_keyboard,
+    parse_callback_int,
 )
 from tg_drop_bot.bot.states import CaptchaStates
 from tg_drop_bot.config import Settings
@@ -19,14 +20,16 @@ from tg_drop_bot.db.models import CaptchaChallenge, Participant
 from tg_drop_bot.services.access import is_admin
 from tg_drop_bot.services.captcha import (
     create_captcha_challenge,
+    find_challenge_matching_answer,
     get_blocking_captcha_challenge,
-    get_latest_pending_captcha_challenge,
+    get_pending_captcha_challenges,
     looks_like_captcha_answer,
     verify_captcha_answer,
 )
 from tg_drop_bot.services.conditions import check_participant_conditions
 from tg_drop_bot.services.giveaways import (
     get_giveaway,
+    is_giveaway_open,
     list_published_giveaways,
     register_participant_after_condition_check,
     single_giveaway_or_none,
@@ -37,6 +40,10 @@ router = Router(name="participant")
 GIVEAWAY_PAYLOAD_RE = re.compile(r"^giveaway_(\d+)$")
 
 
+def captcha_cooldown_notice(settings: Settings) -> str:
+    return f"Новую капчу можно получить через {settings.captcha_cooldown_seconds} сек."
+
+
 @router.callback_query(F.data.startswith("participate:"))
 async def participate_callback(
     callback: CallbackQuery,
@@ -45,8 +52,10 @@ async def participate_callback(
     settings: Settings,
     bot: Bot,
 ) -> None:
-    assert callback.data is not None
-    giveaway_id = int(callback.data.split(":")[1])
+    giveaway_id = parse_callback_int(callback.data, 1)
+    if giveaway_id is None:
+        await callback.answer("Кнопка устарела.", show_alert=True)
+        return
     if isinstance(callback.message, Message) and callback.message.chat.type == "private":
         await callback.answer()
         await state.clear()
@@ -119,6 +128,9 @@ async def start_captcha_flow(
     if giveaway is None or giveaway.status != "published" or giveaway.channel is None:
         await message.answer("Этот розыгрыш сейчас недоступен.")
         return
+    if not is_giveaway_open(giveaway):
+        await message.answer("Прием заявок в этом розыгрыше уже закрыт, подводим итоги.")
+        return
 
     condition_check = await check_participant_conditions(bot, giveaway, participant_user.id)
     if not condition_check.ok:
@@ -135,9 +147,7 @@ async def start_captcha_flow(
     )
     if blocking_challenge is not None:
         if blocking_challenge.status == "failed":
-            await message.answer(
-                "Слишком много попыток. Новую капчу можно получить через 1 минуту."
-            )
+            await message.answer("Слишком много попыток. " + captcha_cooldown_notice(settings))
         else:
             await message.answer(
                 "Капча уже отправлена. Введите код из последнего сообщения с картинкой "
@@ -161,12 +171,14 @@ async def refresh_captcha_callback(
     settings: Settings,
     bot: Bot,
 ) -> None:
-    assert callback.data is not None
     if callback.from_user is None or not isinstance(callback.message, Message):
         await callback.answer("Капча устарела.", show_alert=True)
         return
 
-    challenge_id = int(callback.data.split(":")[2])
+    challenge_id = parse_callback_int(callback.data, 2)
+    if challenge_id is None:
+        await callback.answer("Капча устарела.", show_alert=True)
+        return
     challenge = await session.get(CaptchaChallenge, challenge_id)
     if (
         challenge is None
@@ -177,7 +189,7 @@ async def refresh_captcha_callback(
         return
 
     giveaway = await get_giveaway(session, challenge.giveaway_id)
-    if giveaway is None or giveaway.status != "published" or giveaway.channel is None:
+    if giveaway is None or not is_giveaway_open(giveaway):
         await callback.answer("Розыгрыш сейчас недоступен.", show_alert=True)
         return
 
@@ -252,7 +264,9 @@ async def captcha_answer(
     data = await state.get_data()
     challenge_id = data.get("challenge_id")
     if challenge_id is None:
-        challenge = await get_latest_pending_captcha_challenge(session, message.from_user.id)
+        challenge = await find_stateless_challenge(
+            session, settings, message.from_user.id, message.text
+        )
     else:
         challenge = await session.get(CaptchaChallenge, challenge_id)
     await process_captcha_answer(message, state, session, settings, bot, challenge)
@@ -270,10 +284,30 @@ async def captcha_answer_without_state(
         return
     if not looks_like_captcha_answer(message.text):
         return
-    challenge = await get_latest_pending_captcha_challenge(session, message.from_user.id)
+    challenge = await find_stateless_challenge(
+        session, settings, message.from_user.id, message.text
+    )
     if challenge is None:
         return
     await process_captcha_answer(message, state, session, settings, bot, challenge)
+
+
+async def find_stateless_challenge(
+    session: AsyncSession,
+    settings: Settings,
+    user_id: int,
+    answer_text: str,
+) -> CaptchaChallenge | None:
+    """Resolve which pending captcha the text answers when FSM state is lost.
+
+    Prefers the challenge whose answer actually matches (the user may hold
+    captchas for several giveaways), falling back to the most recent one.
+    """
+    challenges = await get_pending_captcha_challenges(session, user_id)
+    if not challenges:
+        return None
+    matched = find_challenge_matching_answer(challenges, answer_text, settings)
+    return matched or challenges[0]
 
 
 async def process_captcha_answer(
@@ -292,6 +326,10 @@ async def process_captcha_answer(
         await state.clear()
         await message.answer("Проверка устарела. Нажмите кнопку участия еще раз.")
         return
+    if not is_giveaway_open(giveaway):
+        await state.clear()
+        await message.answer("Прием заявок в этом розыгрыше уже закрыт, подводим итоги.")
+        return
 
     verification = await verify_captcha_answer(session, settings, challenge, message.text)
     if not verification.ok:
@@ -301,14 +339,12 @@ async def process_captcha_answer(
             await message.answer("Капча истекла. Нажмите кнопку участия еще раз.")
         elif verification.reason == "cooldown":
             await state.clear()
-            await message.answer(
-                "Слишком много попыток. Новую капчу можно получить через 1 минуту."
-            )
+            await message.answer("Слишком много попыток. " + captcha_cooldown_notice(settings))
         elif verification.attempts_left > 0:
             await message.answer(f"Код неверный. Осталось попыток: {verification.attempts_left}.")
         else:
             await state.clear()
-            await message.answer("Попытки закончились. Новую капчу можно получить через 1 минуту.")
+            await message.answer("Попытки закончились. " + captcha_cooldown_notice(settings))
         return
 
     registration = await register_participant_after_condition_check(

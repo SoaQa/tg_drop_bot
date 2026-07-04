@@ -16,6 +16,20 @@ from tg_drop_bot.services.rendering import giveaway_status_label
 CHANNEL_REQUEST_ID = 1
 
 
+def parse_callback_int(data: str | None, index: int) -> int | None:
+    """Safely extract an integer segment from ':'-separated callback data.
+
+    Callback data is client-forgeable, so handlers must not crash on
+    malformed payloads.
+    """
+    if not data:
+        return None
+    parts = data.split(":")
+    if index >= len(parts) or not parts[index].isdigit():
+        return None
+    return int(parts[index])
+
+
 def admin_main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -111,32 +125,41 @@ def giveaway_card_keyboard(giveaway: Giveaway) -> InlineKeyboardMarkup:
             InlineKeyboardButton(
                 text="Список участников", callback_data=f"giveaway:csv:{giveaway.id}"
             ),
-            InlineKeyboardButton(
-                text="Название", callback_data=f"giveaway:edit_title:{giveaway.id}"
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                text="Описание", callback_data=f"giveaway:edit_text:{giveaway.id}"
-            ),
-            InlineKeyboardButton(
-                text="Условие участия", callback_data=f"giveaway:edit_terms:{giveaway.id}"
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                text="Кол-во победителей", callback_data=f"giveaway:edit_winners:{giveaway.id}"
-            ),
-            InlineKeyboardButton(
-                text="Дата завершения", callback_data=f"giveaway:edit_deadline:{giveaway.id}"
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                text="Изменить картинку", callback_data=f"giveaway:edit_image:{giveaway.id}"
-            ),
         ],
     ]
+    if giveaway.status in {"draft", "published"}:
+        rows.extend(
+            [
+                [
+                    InlineKeyboardButton(
+                        text="Название", callback_data=f"giveaway:edit_title:{giveaway.id}"
+                    ),
+                    InlineKeyboardButton(
+                        text="Описание", callback_data=f"giveaway:edit_text:{giveaway.id}"
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="Условие участия",
+                        callback_data=f"giveaway:edit_terms:{giveaway.id}",
+                    ),
+                    InlineKeyboardButton(
+                        text="Кол-во победителей",
+                        callback_data=f"giveaway:edit_winners:{giveaway.id}",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="Дата завершения",
+                        callback_data=f"giveaway:edit_deadline:{giveaway.id}",
+                    ),
+                    InlineKeyboardButton(
+                        text="Изменить картинку",
+                        callback_data=f"giveaway:edit_image:{giveaway.id}",
+                    ),
+                ],
+            ]
+        )
     if giveaway.status == "published":
         rows.append(
             [

@@ -109,3 +109,28 @@ async def test_verify_captcha_answer_locks_after_attempts() -> None:
     assert not result.ok
     assert challenge.status == "failed"
     assert challenge.cooldown_until is not None
+
+
+def test_find_challenge_matching_answer_prefers_matching_giveaway() -> None:
+    from tg_drop_bot.services.captcha import find_challenge_matching_answer
+
+    settings = Settings(APP_SECRET_KEY="secret")
+    newer = CaptchaChallenge(
+        giveaway_id=2,
+        user_id=1,
+        answer_hash=hash_captcha_answer("ZZZZZ", settings),
+        status="pending",
+        expires_at=utc_now() + timedelta(minutes=5),
+    )
+    older = CaptchaChallenge(
+        giveaway_id=1,
+        user_id=1,
+        answer_hash=hash_captcha_answer("ABCDE", settings),
+        status="pending",
+        expires_at=utc_now() + timedelta(minutes=5),
+    )
+
+    match = find_challenge_matching_answer([newer, older], "abcde", settings)
+
+    assert match is older
+    assert find_challenge_matching_answer([newer, older], "WRONG", settings) is None

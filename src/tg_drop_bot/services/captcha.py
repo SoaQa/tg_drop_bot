@@ -99,10 +99,10 @@ async def get_blocking_captcha_challenge(
     return result.scalar_one_or_none()
 
 
-async def get_latest_pending_captcha_challenge(
+async def get_pending_captcha_challenges(
     session: AsyncSession,
     user_id: int,
-) -> CaptchaChallenge | None:
+) -> list[CaptchaChallenge]:
     result = await session.execute(
         select(CaptchaChallenge)
         .where(
@@ -110,9 +110,25 @@ async def get_latest_pending_captcha_challenge(
             CaptchaChallenge.status == "pending",
         )
         .order_by(CaptchaChallenge.created_at.desc(), CaptchaChallenge.id.desc())
-        .limit(1)
     )
-    return result.scalar_one_or_none()
+    return list(result.scalars().all())
+
+
+def find_challenge_matching_answer(
+    challenges: list[CaptchaChallenge],
+    answer: str,
+    settings: Settings,
+) -> CaptchaChallenge | None:
+    """Pick the pending challenge whose answer matches the text.
+
+    A user can hold captchas for several giveaways at once; matching by
+    answer keeps a correct code from burning attempts on the wrong challenge.
+    """
+    hashed = hash_captcha_answer(answer, settings)
+    for challenge in challenges:
+        if challenge.answer_hash == hashed:
+            return challenge
+    return None
 
 
 def looks_like_captcha_answer(text: str) -> bool:

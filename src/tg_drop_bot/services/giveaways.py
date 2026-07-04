@@ -3,13 +3,15 @@ from __future__ import annotations
 import html
 import logging
 import random
-from dataclasses import dataclass
-from datetime import UTC
+from dataclasses import dataclass, field
+from datetime import timedelta
+from typing import Any, cast
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
-from aiogram.types import BufferedInputFile, InputMediaPhoto, Message, User
-from sqlalchemy import func, select
+from aiogram.types import BufferedInputFile, InputMediaPhoto, Message, ReplyParameters, User
+from sqlalchemy import CursorResult, func, inspect, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -18,9 +20,31 @@ from tg_drop_bot.config import Settings
 from tg_drop_bot.db.models import AuditLog, Giveaway, KnownChannel, Participant, Winner
 from tg_drop_bot.services.conditions import ConditionCheck, check_participant_conditions
 from tg_drop_bot.services.dates import utc_now
-from tg_drop_bot.services.rendering import giveaway_title, mention_participant, render_giveaway_post
+from tg_drop_bot.services.rendering import (
+    channel_post_link,
+    giveaway_title,
+    render_giveaway_post,
+    render_results_announcement,
+)
 
 logger = logging.getLogger(__name__)
+
+# Telegram limits: 1024 characters for photo captions, 4096 for plain messages.
+PHOTO_CAPTION_LIMIT = 1024
+MESSAGE_TEXT_LIMIT = 4096
+
+RESULTS_STATE_PENDING = "pending"
+RESULTS_STATE_DRAWN = "drawn"
+RESULTS_STATE_ANNOUNCED = "announced"
+
+# A finished giveaway stuck in results_state="pending" longer than this is
+# considered orphaned by a crash and is safe to resume: a live finish keeps
+# "pending" only while it re-checks participants.
+RESULTS_RESUME_GRACE = timedelta(minutes=10)
+
+
+class PublishGiveawayError(RuntimeError):
+    """Publish failed for a reason the admin should see verbatim."""
 
 
 @dataclass(frozen=True)
@@ -28,6 +52,12 @@ class ParticipantRegistration:
     participant: Participant | None
     created: bool
     condition_check: ConditionCheck
+
+
+@dataclass(frozen=True)
+class FinishResult:
+    finished: bool
+    winners: list[Participant] = field(default_factory=list)
 
 
 async def add_audit(
@@ -46,6 +76,51 @@ async def add_audit(
             payload=payload or {},
         )
     )
+
+
+async def ensure_channel_loaded(session: AsyncSession, giveaway: Giveaway) -> None:
+    """Load the channel relationship without triggering an async lazy-load."""
+    if "channel" in inspect(giveaway).unloaded:
+        await session.refresh(giveaway, attribute_names=["channel"])
+
+
+async def try_status_transition(
+    session: AsyncSession,
+    giveaway: Giveaway,
+    *,
+    expected_status: str,
+    **values: object,
+) -> bool:
+    """Atomically move the giveaway out of ``expected_status``.
+
+    The UPDATE races safely against concurrent workers (scheduler tick vs
+    manual admin action): exactly one of them observes rowcount == 1. Does not
+    commit; the caller decides the transaction boundary.
+    """
+    result = await session.execute(
+        update(Giveaway)
+        .where(Giveaway.id == giveaway.id, Giveaway.status == expected_status)
+        .values(**values)
+        .execution_options(synchronize_session="fetch")
+    )
+    return cast(CursorResult[Any], result).rowcount == 1
+
+
+async def try_results_state_transition(
+    session: AsyncSession,
+    giveaway: Giveaway,
+    *,
+    expected_state: str,
+    new_state: str,
+) -> bool:
+    """Atomically advance results_state; False if another worker got there first."""
+    result = await session.execute(
+        update(Giveaway)
+        .where(Giveaway.id == giveaway.id, Giveaway.results_state == expected_state)
+        .values(results_state=new_state)
+        .execution_options(synchronize_session="fetch")
+    )
+    return cast(CursorResult[Any], result).rowcount == 1
 
 
 async def upsert_known_channel(
@@ -173,8 +248,12 @@ async def publish_giveaway(
     giveaway: Giveaway,
     actor_user_id: int,
 ) -> Message:
-    if giveaway.channel is None:
-        await session.refresh(giveaway, attribute_names=["channel"])
+    """Publish a draft to its channel. Commits its own work.
+
+    The draft is atomically claimed before the channel post is sent, so a
+    double click or a concurrent worker cannot publish the same giveaway twice.
+    """
+    await ensure_channel_loaded(session, giveaway)
     if giveaway.channel is None:
         raise RuntimeError("Giveaway channel is not selected")
     missing = validate_draft(giveaway)
@@ -182,25 +261,64 @@ async def publish_giveaway(
         raise RuntimeError("Draft is incomplete: " + ", ".join(missing))
 
     text = render_giveaway_post(giveaway, settings, participants_count=0)
-    me = await bot.get_me()
+    if giveaway.image_file_id and len(text) > PHOTO_CAPTION_LIMIT:
+        raise PublishGiveawayError(
+            "Пост с картинкой не может быть длиннее "
+            f"{PHOTO_CAPTION_LIMIT} символов (сейчас {len(text)}). "
+            "Сократите описание или уберите картинку."
+        )
+    if len(text) > MESSAGE_TEXT_LIMIT:
+        raise PublishGiveawayError(
+            f"Пост не может быть длиннее {MESSAGE_TEXT_LIMIT} символов (сейчас {len(text)}). "
+            "Сократите описание."
+        )
+
+    claimed = await try_status_transition(
+        session,
+        giveaway,
+        expected_status="draft",
+        status="published",
+        published_at=utc_now(),
+    )
+    if not claimed:
+        await session.rollback()
+        raise PublishGiveawayError("Розыгрыш уже опубликован или недоступен.")
+    await session.commit()
+
+    me = await bot.me()
     keyboard = participation_keyboard(giveaway.id, me.username)
-    if giveaway.image_file_id:
-        message = await bot.send_photo(
-            chat_id=giveaway.channel.telegram_chat_id,
-            photo=giveaway.image_file_id,
-            caption=text,
-            reply_markup=keyboard,
+    try:
+        if giveaway.image_file_id:
+            message = await bot.send_photo(
+                chat_id=giveaway.channel.telegram_chat_id,
+                photo=giveaway.image_file_id,
+                caption=text,
+                reply_markup=keyboard,
+            )
+        else:
+            message = await bot.send_message(
+                chat_id=giveaway.channel.telegram_chat_id,
+                text=text,
+                reply_markup=keyboard,
+                disable_web_page_preview=True,
+            )
+    except TelegramAPIError as error:
+        # Sending failed: return the giveaway to drafts so it can be retried.
+        await try_status_transition(
+            session,
+            giveaway,
+            expected_status="published",
+            status="draft",
+            published_at=None,
         )
-    else:
-        message = await bot.send_message(
-            chat_id=giveaway.channel.telegram_chat_id,
-            text=text,
-            reply_markup=keyboard,
-            disable_web_page_preview=True,
-        )
-    giveaway.status = "published"
+        await session.commit()
+        logger.exception("Failed to publish giveaway", extra={"giveaway_id": giveaway.id})
+        raise PublishGiveawayError(
+            "Не удалось опубликовать пост в канале. Проверьте, что бот остается "
+            "администратором канала, и попробуйте еще раз."
+        ) from error
+
     giveaway.message_id = message.message_id
-    giveaway.published_at = utc_now()
     await add_audit(
         session,
         "giveaway.published",
@@ -208,7 +326,7 @@ async def publish_giveaway(
         actor_user_id=actor_user_id,
         payload={"message_id": message.message_id},
     )
-    await session.flush()
+    await session.commit()
     return message
 
 
@@ -226,7 +344,7 @@ async def edit_published_message(
         settings,
         participants_count=participants_count,
     )
-    me = await bot.get_me()
+    me = await bot.me()
     keyboard = participation_keyboard(giveaway.id, me.username)
     try:
         if giveaway.image_file_id:
@@ -258,9 +376,9 @@ async def replace_published_image(
     *,
     participants_count: int | None = None,
 ) -> None:
+    giveaway.image_file_id = image_file_id
     if giveaway.channel is None or giveaway.message_id is None:
         return
-    giveaway.image_file_id = image_file_id
     await bot.edit_message_media(
         chat_id=giveaway.channel.telegram_chat_id,
         message_id=giveaway.message_id,
@@ -272,7 +390,7 @@ async def replace_published_image(
                 participants_count=participants_count,
             ),
         ),
-        reply_markup=participation_keyboard(giveaway.id, (await bot.get_me()).username),
+        reply_markup=participation_keyboard(giveaway.id, (await bot.me()).username),
     )
 
 
@@ -318,20 +436,35 @@ async def cancel_giveaway(
     settings: Settings,
     giveaway: Giveaway,
     actor_user_id: int,
-) -> None:
+) -> bool:
+    """Cancel a published giveaway. Commits its own work.
+
+    Returns False when the giveaway was already finished or cancelled by a
+    concurrent worker (e.g. the scheduler hit the deadline first).
+    """
+    await add_audit(
+        session, "giveaway.cancelled", giveaway_id=giveaway.id, actor_user_id=actor_user_id
+    )
+    claimed = await try_status_transition(
+        session,
+        giveaway,
+        expected_status="published",
+        status="cancelled",
+        cancelled_at=utc_now(),
+    )
+    if not claimed:
+        await session.rollback()
+        return False
+    await session.commit()
+
     participants_count = await count_participants(session, giveaway.id)
-    giveaway.status = "cancelled"
-    giveaway.cancelled_at = utc_now()
     await close_source_post(
         bot,
         settings,
         giveaway,
         participants_count=participants_count,
     )
-    await add_audit(
-        session, "giveaway.cancelled", giveaway_id=giveaway.id, actor_user_id=actor_user_id
-    )
-    await session.flush()
+    return True
 
 
 async def register_participant(
@@ -361,8 +494,22 @@ async def register_participant(
         membership_status="member",
         membership_checked_at=now,
     )
-    session.add(participant)
-    await session.flush()
+    try:
+        async with session.begin_nested():
+            session.add(participant)
+            await session.flush()
+    except IntegrityError:
+        # Гонка двух параллельных апдейтов: участник уже зарегистрирован.
+        result = await session.execute(
+            select(Participant).where(
+                Participant.giveaway_id == giveaway.id,
+                Participant.user_id == user.id,
+            )
+        )
+        existing = result.scalar_one_or_none()
+        if existing is None:
+            raise
+        return existing, False
     await add_audit(
         session,
         "participant.joined",
@@ -421,74 +568,353 @@ async def finish_giveaway(
     *,
     actor_user_id: int | None,
     manual: bool,
-) -> list[Winner]:
+) -> FinishResult:
+    """Finish a published giveaway. Commits its own work in stages.
+
+    Order matters: the giveaway is atomically claimed (status -> finished)
+    and committed BEFORE any Telegram side effect, so a failed announcement
+    can never roll the status back to published and cause repeated draws or
+    duplicate result posts. Interrupted stages are resumed by the scheduler
+    via resume_unfinished_results().
+    """
+    await ensure_channel_loaded(session, giveaway)
     if giveaway.status != "published" or giveaway.channel is None:
-        return []
+        return FinishResult(finished=False)
 
-    participants = await list_participants(session, giveaway.id)
-    valid_participants: list[Participant] = []
-    now = utc_now()
-    for participant in participants:
-        condition_check = await check_participant_conditions(bot, giveaway, participant.user_id)
-        participant.membership_status = condition_check.membership_status
-        participant.membership_checked_at = now
-        if condition_check.ok:
-            valid_participants.append(participant)
-
-    selected = pick_winners(valid_participants, giveaway.winners_count or 0)
-    winners: list[Winner] = []
-    for index, participant in enumerate(selected, start=1):
-        winner = Winner(
-            giveaway_id=giveaway.id,
-            participant_id=participant.id,
-            user_id=participant.user_id,
-            position=index,
-        )
-        session.add(winner)
-        winners.append(winner)
-
-    giveaway.status = "finished"
-    giveaway.finished_at = now.astimezone(UTC)
-    await session.flush()
-
-    await publish_winner_announcement(bot, giveaway, selected, len(valid_participants))
-    await close_source_post(bot, settings, giveaway, participants_count=len(participants))
     await add_audit(
         session,
         "giveaway.finished.manual" if manual else "giveaway.finished.auto",
         giveaway_id=giveaway.id,
         actor_user_id=actor_user_id,
-        payload={"valid_participants": len(valid_participants), "winners": len(winners)},
     )
-    await session.flush()
-    return winners
+    claimed = await try_status_transition(
+        session,
+        giveaway,
+        expected_status="published",
+        status="finished",
+        finished_at=utc_now(),
+        results_state=RESULTS_STATE_PENDING,
+    )
+    if not claimed:
+        await session.rollback()
+        return FinishResult(finished=False)
+    await session.commit()
+
+    await announce_results_preparing(session, bot, giveaway)
+    winners = await draw_and_record_winners(session, bot, giveaway)
+    await publish_giveaway_results(session, bot, settings, giveaway, winners)
+    return FinishResult(finished=True, winners=winners)
 
 
-async def publish_winner_announcement(
+async def announce_results_preparing(
+    session: AsyncSession,
+    bot: Bot,
+    giveaway: Giveaway,
+) -> None:
+    """Immediately tell the channel that results are being prepared.
+
+    Participant re-validation can take a while, so this message appears right
+    at the deadline and is later edited into the final results. Best-effort:
+    a failure here does not block the draw.
+    """
+    if giveaway.channel is None or giveaway.result_message_id is not None:
+        return
+    text = (
+        f"<b>Розыгрыш «{html.escape(giveaway_title(giveaway))}» завершен.</b>\n\n"
+        "Подводим итоги и проверяем участников. "
+        "Результаты появятся в этом сообщении."
+    )
+    reply_parameters = None
+    if giveaway.message_id is not None:
+        reply_parameters = ReplyParameters(
+            message_id=giveaway.message_id, allow_sending_without_reply=True
+        )
+    try:
+        message = await bot.send_message(
+            chat_id=giveaway.channel.telegram_chat_id,
+            text=text,
+            reply_parameters=reply_parameters,
+            disable_web_page_preview=True,
+        )
+    except TelegramAPIError:
+        logger.exception(
+            "Failed to announce results preparation",
+            extra={"giveaway_id": giveaway.id},
+        )
+        return
+    giveaway.result_message_id = message.message_id
+    await session.commit()
+
+
+async def draw_and_record_winners(
+    session: AsyncSession,
+    bot: Bot,
+    giveaway: Giveaway,
+) -> list[Participant]:
+    """Revalidate participants, pick winners and persist them atomically.
+
+    The pending -> drawn transition is claimed atomically, so a slow live
+    finish and the scheduler's resume sweep can never both record a winner
+    set: the loser discards its draw and returns the persisted winners.
+    """
+    participants = await list_participants(session, giveaway.id)
+    valid_participants: list[Participant] = []
+    check_failures = 0
+    now = utc_now()
+    for participant in participants:
+        condition_check = await check_participant_conditions(bot, giveaway, participant.user_id)
+        if condition_check.membership_status == "check_failed":
+            # Retry once: single flaky API call must not disqualify a participant.
+            condition_check = await check_participant_conditions(
+                bot, giveaway, participant.user_id
+            )
+        participant.membership_status = condition_check.membership_status
+        participant.membership_checked_at = now
+        if condition_check.ok:
+            valid_participants.append(participant)
+        elif condition_check.membership_status == "check_failed":
+            # Telegram недоступен: не выкидываем участника из розыгрыша,
+            # подписку он уже подтверждал при регистрации.
+            check_failures += 1
+            valid_participants.append(participant)
+
+    selected = pick_winners(valid_participants, giveaway.winners_count or 0)
+
+    claimed = await try_results_state_transition(
+        session,
+        giveaway,
+        expected_state=RESULTS_STATE_PENDING,
+        new_state=RESULTS_STATE_DRAWN,
+    )
+    if not claimed:
+        # Другой работник уже разыграл — используем его победителей.
+        await session.rollback()
+        return await list_winner_participants(session, giveaway.id)
+
+    for index, participant in enumerate(selected, start=1):
+        session.add(
+            Winner(
+                giveaway_id=giveaway.id,
+                participant_id=participant.id,
+                user_id=participant.user_id,
+                position=index,
+            )
+        )
+    await add_audit(
+        session,
+        "giveaway.results.drawn",
+        giveaway_id=giveaway.id,
+        payload={
+            "participants": len(participants),
+            "valid_participants": len(valid_participants),
+            "membership_check_failures": check_failures,
+            "winners": len(selected),
+        },
+    )
+    await session.commit()
+    return selected
+
+
+async def publish_giveaway_results(
+    session: AsyncSession,
+    bot: Bot,
+    settings: Settings,
+    giveaway: Giveaway,
+    winners: list[Participant],
+    *,
+    notify_creator_on_failure: bool = True,
+) -> None:
+    """Publish final results and notify everyone. Commits its own work.
+
+    Edits the "подводим итоги" message into the final results (or sends a new
+    message when there is none), closes the source post and notifies the
+    creator and winners in private chat. Each step is best-effort;
+    announcement success is recorded in results_state so the scheduler
+    retries only what failed. ``notify_creator_on_failure=False`` keeps
+    scheduled retries from spamming the creator with repeated failure DMs.
+    """
+    announced = False
+    text = render_results_announcement(giveaway, winners)
+    if giveaway.channel is not None:
+        try:
+            if giveaway.result_message_id is not None:
+                try:
+                    await bot.edit_message_text(
+                        chat_id=giveaway.channel.telegram_chat_id,
+                        message_id=giveaway.result_message_id,
+                        text=text,
+                        disable_web_page_preview=True,
+                    )
+                except TelegramBadRequest as error:
+                    # "Not modified" means the results are already there.
+                    if "message is not modified" not in str(error).lower():
+                        raise
+            else:
+                reply_parameters = None
+                if giveaway.message_id is not None:
+                    reply_parameters = ReplyParameters(
+                        message_id=giveaway.message_id, allow_sending_without_reply=True
+                    )
+                message = await bot.send_message(
+                    chat_id=giveaway.channel.telegram_chat_id,
+                    text=text,
+                    reply_parameters=reply_parameters,
+                    disable_web_page_preview=True,
+                )
+                giveaway.result_message_id = message.message_id
+            announced = True
+        except TelegramAPIError:
+            logger.exception(
+                "Failed to publish giveaway results",
+                extra={"giveaway_id": giveaway.id},
+            )
+    if announced:
+        giveaway.results_state = RESULTS_STATE_ANNOUNCED
+        await add_audit(
+            session,
+            "giveaway.results.announced",
+            giveaway_id=giveaway.id,
+            payload={"winners": len(winners)},
+        )
+    await session.commit()
+
+    participants_count = await count_participants(session, giveaway.id)
+    await close_source_post(bot, settings, giveaway, participants_count=participants_count)
+    if announced or notify_creator_on_failure:
+        await notify_creator_about_results(bot, giveaway, winners, announced=announced)
+    if announced:
+        await notify_winners_about_results(bot, giveaway, winners)
+
+
+async def notify_creator_about_results(
     bot: Bot,
     giveaway: Giveaway,
     winners: list[Participant],
-    valid_count: int,
+    *,
+    announced: bool,
 ) -> None:
-    if giveaway.channel is None:
-        return
-    lines = [f"<b>Итоги розыгрыша: {html.escape(giveaway_title(giveaway))}</b>"]
+    """Tell the giveaway creator in private chat that the results are ready."""
+    lines = [f"Розыгрыш «{html.escape(giveaway_title(giveaway))}» завершен."]
     if winners:
-        lines.append("")
-        lines.extend(
-            f"{index}. {mention_participant(participant)}"
-            for index, participant in enumerate(winners, 1)
-        )
+        lines.append(f"Победителей: {len(winners)}.")
     else:
-        lines.extend(["", "Победителей нет: не нашлось валидных участников."])
-    if giveaway.winners_count and valid_count < giveaway.winners_count:
-        lines.extend(["", f"Валидных участников было меньше: {valid_count}."])
-    message = await bot.send_message(
-        chat_id=giveaway.channel.telegram_chat_id,
-        text="\n".join(lines),
-        disable_web_page_preview=True,
+        lines.append("Победителей нет: не нашлось валидных участников.")
+    link = channel_post_link(giveaway.channel, giveaway.result_message_id)
+    if announced and link:
+        lines.append(f"Итоги в канале: {link}")
+    if not announced:
+        lines.append(
+            "Опубликовать итоги в канале не удалось - бот будет пробовать еще раз автоматически."
+        )
+    try:
+        await bot.send_message(
+            chat_id=giveaway.creator_user_id,
+            text="\n".join(lines),
+            disable_web_page_preview=True,
+        )
+    except TelegramAPIError as error:
+        logger.warning(
+            "Failed to notify creator %s about giveaway %s results: %s",
+            giveaway.creator_user_id,
+            giveaway.id,
+            error,
+        )
+
+
+async def notify_winners_about_results(
+    bot: Bot,
+    giveaway: Giveaway,
+    winners: list[Participant],
+) -> None:
+    """Congratulate each winner in private chat (they all started the bot for captcha)."""
+    link = channel_post_link(giveaway.channel, giveaway.result_message_id)
+    lines = [f"Поздравляем! Вы выиграли в розыгрыше «{html.escape(giveaway_title(giveaway))}»."]
+    if link:
+        lines.append(f"Итоги: {link}")
+    lines.append("Организатор свяжется с вами или опубликует инструкции в канале.")
+    text = "\n".join(lines)
+    for participant in winners:
+        try:
+            await bot.send_message(
+                chat_id=participant.user_id,
+                text=text,
+                disable_web_page_preview=True,
+            )
+        except TelegramAPIError as error:
+            logger.warning(
+                "Failed to notify winner %s of giveaway %s: %s",
+                participant.user_id,
+                giveaway.id,
+                error,
+            )
+
+
+async def list_winner_participants(session: AsyncSession, giveaway_id: int) -> list[Participant]:
+    result = await session.execute(
+        select(Participant)
+        .join(Winner, Winner.participant_id == Participant.id)
+        .where(Winner.giveaway_id == giveaway_id)
+        .order_by(Winner.position.asc())
     )
-    giveaway.result_message_id = message.message_id
+    return list(result.scalars().all())
+
+
+async def resume_unfinished_results(
+    session: AsyncSession,
+    bot: Bot,
+    settings: Settings,
+) -> list[int]:
+    """Complete result publication interrupted by a crash or Telegram failure.
+
+    "drawn" giveaways only need the announcement retried. "pending" ones are
+    resumed after a grace period (so a live, slow finish is not raced) by
+    drawing winners from scratch - the draw and results_state advance in one
+    transaction, so no partial winner set can exist.
+    """
+    stale_before = utc_now() - RESULTS_RESUME_GRACE
+    result = await session.execute(
+        select(Giveaway)
+        .options(selectinload(Giveaway.channel))
+        .where(
+            Giveaway.status == "finished",
+            Giveaway.results_state != RESULTS_STATE_ANNOUNCED,
+            or_(
+                Giveaway.results_state == RESULTS_STATE_DRAWN,
+                Giveaway.finished_at.is_(None),
+                Giveaway.finished_at <= stale_before,
+            ),
+        )
+        .order_by(Giveaway.finished_at.asc())
+    )
+    resumed: list[int] = []
+    for giveaway in result.scalars().all():
+        try:
+            if giveaway.results_state == RESULTS_STATE_PENDING:
+                selected = await draw_and_record_winners(session, bot, giveaway)
+            else:
+                selected = await list_winner_participants(session, giveaway.id)
+            await publish_giveaway_results(
+                session,
+                bot,
+                settings,
+                giveaway,
+                selected,
+                notify_creator_on_failure=False,
+            )
+            resumed.append(giveaway.id)
+        except Exception:
+            logger.exception(
+                "Failed to resume giveaway results",
+                extra={"giveaway_id": giveaway.id},
+            )
+    return resumed
+
+
+def is_giveaway_open(giveaway: Giveaway) -> bool:
+    """Whether the giveaway still accepts participants (published, deadline not passed)."""
+    if giveaway.status != "published" or giveaway.channel is None:
+        return False
+    return giveaway.deadline_at is None or giveaway.deadline_at > utc_now()
 
 
 async def due_published_giveaways(session: AsyncSession) -> list[Giveaway]:
@@ -505,10 +931,23 @@ async def refresh_published_giveaway_messages(
     session: AsyncSession,
     bot: Bot,
     settings: Settings,
+    last_rendered_counts: dict[int, int] | None = None,
 ) -> None:
+    """Refresh participant counters on published channel posts.
+
+    ``last_rendered_counts`` lets the scheduler skip posts whose counter has
+    not changed, so the bot does not burn the flood limit on no-op edits.
+    """
     giveaways = await list_published_giveaways(session)
+    seen_ids: set[int] = set()
     for giveaway in giveaways:
+        seen_ids.add(giveaway.id)
         participants_count = await count_participants(session, giveaway.id)
+        if (
+            last_rendered_counts is not None
+            and last_rendered_counts.get(giveaway.id) == participants_count
+        ):
+            continue
         try:
             await edit_published_message(
                 bot,
@@ -521,6 +960,12 @@ async def refresh_published_giveaway_messages(
                 "Failed to refresh giveaway message",
                 extra={"giveaway_id": giveaway.id},
             )
+            continue
+        if last_rendered_counts is not None:
+            last_rendered_counts[giveaway.id] = participants_count
+    if last_rendered_counts is not None:
+        for stale_id in set(last_rendered_counts) - seen_ids:
+            last_rendered_counts.pop(stale_id)
 
 
 async def build_csv_file(session: AsyncSession, giveaway_id: int) -> BufferedInputFile:
