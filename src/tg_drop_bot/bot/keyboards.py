@@ -92,12 +92,21 @@ def draft_conditions_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def draft_preview_keyboard(giveaway_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
+def draft_preview_keyboard(giveaway_id: int, *, can_publish: bool = True) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if can_publish:
+        rows.append(
             [
                 InlineKeyboardButton(
-                    text="Опубликовать", callback_data=f"draft:publish:{giveaway_id}"
+                    text="Опубликовать и запустить", callback_data=f"draft:publish:{giveaway_id}"
+                )
+            ]
+        )
+    rows.extend(
+        [
+            [
+                InlineKeyboardButton(
+                    text="Вернуться к настройкам", callback_data=f"giveaway:view:{giveaway_id}"
                 )
             ],
             [
@@ -107,6 +116,7 @@ def draft_preview_keyboard(giveaway_id: int) -> InlineKeyboardMarkup:
             ],
         ]
     )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def giveaway_list_keyboard(giveaways: list[Giveaway]) -> InlineKeyboardMarkup:
@@ -172,6 +182,14 @@ def giveaway_card_keyboard(giveaway: Giveaway) -> InlineKeyboardMarkup:
             ]
         )
     elif giveaway.status == "draft":
+        rows.insert(
+            0,
+            [
+                InlineKeyboardButton(
+                    text="Перейти к запуску", callback_data=f"draft:preview:{giveaway.id}"
+                )
+            ],
+        )
         rows.append(
             [
                 InlineKeyboardButton(

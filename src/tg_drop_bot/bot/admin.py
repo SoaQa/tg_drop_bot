@@ -27,7 +27,7 @@ from tg_drop_bot.bot.keyboards import (
 )
 from tg_drop_bot.bot.states import DraftStates, EditStates
 from tg_drop_bot.config import Settings
-from tg_drop_bot.db.models import KnownChannel
+from tg_drop_bot.db.models import Giveaway, KnownChannel
 from tg_drop_bot.services.access import can_manage_giveaway, is_admin
 from tg_drop_bot.services.conditions import CHANNEL_SUBSCRIPTION_CONDITION, condition_label
 from tg_drop_bot.services.dates import parse_admin_deadline, utc_now
@@ -252,19 +252,57 @@ async def draft_deadline(
     await show_draft_preview(message, giveaway, settings)
 
 
-async def show_draft_preview(message: Message, giveaway, settings: Settings) -> None:
+async def show_draft_preview(message: Message, giveaway: Giveaway, settings: Settings) -> None:
     text = render_giveaway_post(giveaway, settings)
     missing = validate_draft(giveaway)
-    if missing:
-        text += "\n\nНе заполнено: " + ", ".join(missing)
     if giveaway.image_file_id:
         await message.answer_photo(
             giveaway.image_file_id,
             caption=text,
-            reply_markup=draft_preview_keyboard(giveaway.id),
         )
     else:
-        await message.answer(text, reply_markup=draft_preview_keyboard(giveaway.id))
+        await message.answer(text)
+    channel_name = giveaway.channel.title if giveaway.channel else "не выбран"
+    menu = (
+        f"<b>Запуск розыгрыша #{giveaway.id}</b>\n"
+        f"Канал: {html.escape(channel_name)}\n\n"
+        "Выше — предпросмотр поста с текущими настройками.\n"
+    )
+    if missing:
+        menu += "Заполните перед запуском: " + ", ".join(missing) + "."
+    else:
+        menu += (
+            "Нажмите «Опубликовать и запустить», "
+            "чтобы отправить пост в канал и открыть участие."
+        )
+    await message.answer(
+        menu, reply_markup=draft_preview_keyboard(giveaway.id, can_publish=not missing)
+    )
+
+
+@router.callback_query(F.data.startswith("draft:preview:"))
+async def draft_preview(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession, settings: Settings
+) -> None:
+    giveaway_id = parse_callback_int(callback.data, 2)
+    if giveaway_id is None:
+        await callback.answer("Откройте черновик заново.", show_alert=True)
+        return
+    giveaway = await get_giveaway(session, giveaway_id)
+    if giveaway is None or not can_manage_giveaway(callback.from_user.id, giveaway, settings):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    if giveaway.status != "draft":
+        await callback.answer(
+            "Этот розыгрыш уже не черновик. Откройте его карточку.", show_alert=True
+        )
+        return
+    if not isinstance(callback.message, Message):
+        await callback.answer("Откройте черновик заново.", show_alert=True)
+        return
+    await state.clear()
+    await callback.answer()
+    await show_draft_preview(callback.message, giveaway, settings)
 
 
 @router.callback_query(F.data.startswith("draft:publish:"))
@@ -285,6 +323,11 @@ async def draft_publish(
     if giveaway is None or not can_manage_giveaway(callback.from_user.id, giveaway, settings):
         await callback.answer("Розыгрыш не найден или нет доступа.", show_alert=True)
         return
+    if giveaway.status != "draft":
+        await callback.answer(
+            "Этот розыгрыш уже не черновик. Откройте его карточку.", show_alert=True
+        )
+        return
     missing = validate_draft(giveaway)
     if missing:
         await callback.answer("Черновик не заполнен: " + ", ".join(missing), show_alert=True)
@@ -294,6 +337,7 @@ async def draft_publish(
     except PublishGiveawayError as error:
         await callback.answer(str(error), show_alert=True)
         return
+    await callback.message.edit_reply_markup(reply_markup=None)
     text = "Розыгрыш опубликован."
     link = channel_post_link(giveaway.channel, giveaway.message_id)
     if link:
