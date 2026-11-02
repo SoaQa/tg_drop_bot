@@ -79,16 +79,22 @@ async def test_verify_captcha_answer_success() -> None:
         giveaway_id=1,
         user_id=1,
         answer_hash=hash_captcha_answer("ABCDE", settings),
+        status="pending",
         expires_at=utc_now() + timedelta(minutes=5),
     )
 
     class Session:
+        deleted: list[CaptchaChallenge] = []
+
+        async def delete(self, challenge: CaptchaChallenge) -> None:
+            self.deleted.append(challenge)
+
         async def flush(self) -> None:
             return None
 
     result = await verify_captcha_answer(Session(), settings, challenge, "abcde")  # type: ignore[arg-type]
     assert result.ok
-    assert challenge.status == "solved"
+    assert Session.deleted == [challenge]
 
 
 @pytest.mark.asyncio
@@ -98,6 +104,7 @@ async def test_verify_captcha_answer_locks_after_attempts() -> None:
         giveaway_id=1,
         user_id=1,
         answer_hash=hash_captcha_answer("ABCDE", settings),
+        status="pending",
         expires_at=utc_now() + timedelta(minutes=5),
     )
 
@@ -109,6 +116,47 @@ async def test_verify_captcha_answer_locks_after_attempts() -> None:
     assert not result.ok
     assert challenge.status == "failed"
     assert challenge.cooldown_until is not None
+
+
+@pytest.mark.parametrize("status", ["expired", "failed", "pending"])
+async def test_obsolete_captcha_is_deleted_and_cannot_be_replayed(status: str) -> None:
+    from unittest.mock import AsyncMock
+
+    settings = Settings(APP_SECRET_KEY="secret")
+    challenge = CaptchaChallenge(
+        giveaway_id=1,
+        user_id=1,
+        status=status,
+        answer_hash=hash_captcha_answer("ABCDE", settings),
+        expires_at=utc_now() - timedelta(seconds=1),
+        cooldown_until=utc_now() - timedelta(seconds=1),
+    )
+    session = AsyncMock()
+
+    result = await verify_captcha_answer(session, settings, challenge, "ABCDE")
+
+    assert not result.ok
+    assert result.reason == "expired"
+    session.delete.assert_awaited_once_with(challenge)
+
+
+async def test_active_cooldown_is_not_deleted_even_after_captcha_expiry() -> None:
+    from unittest.mock import AsyncMock
+
+    challenge = CaptchaChallenge(
+        giveaway_id=1,
+        user_id=1,
+        status="failed",
+        answer_hash="hash",
+        expires_at=utc_now() - timedelta(seconds=1),
+        cooldown_until=utc_now() + timedelta(seconds=30),
+    )
+    session = AsyncMock()
+
+    result = await verify_captcha_answer(session, Settings(), challenge, "ABCDE")
+
+    assert result.reason == "cooldown"
+    session.delete.assert_not_awaited()
 
 
 def test_find_challenge_matching_answer_prefers_matching_giveaway() -> None:

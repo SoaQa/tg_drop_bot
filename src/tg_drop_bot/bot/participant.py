@@ -6,6 +6,7 @@ from aiogram import Bot, F, Router
 from aiogram.filters import CommandObject, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import BufferedInputFile, CallbackQuery, Message, User
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tg_drop_bot.bot.keyboards import (
@@ -179,7 +180,9 @@ async def refresh_captcha_callback(
     if challenge_id is None:
         await callback.answer("Капча устарела.", show_alert=True)
         return
-    challenge = await session.get(CaptchaChallenge, challenge_id)
+    challenge = await session.scalar(
+        select(CaptchaChallenge).where(CaptchaChallenge.id == challenge_id).with_for_update()
+    )
     if (
         challenge is None
         or challenge.user_id != callback.from_user.id
@@ -201,7 +204,7 @@ async def refresh_captcha_callback(
         )
         return
 
-    challenge.status = "expired"
+    await session.delete(challenge)
     new_challenge, image_bytes = await create_captcha_challenge(
         session,
         settings,
@@ -321,8 +324,20 @@ async def process_captcha_answer(
     if message.from_user is None or not message.text:
         await message.answer("Введите код текстом.")
         return
+    if challenge is not None:
+        challenge = await session.scalar(
+            select(CaptchaChallenge)
+            .where(CaptchaChallenge.id == challenge.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
     giveaway = await get_giveaway(session, challenge.giveaway_id) if challenge else None
-    if challenge is None or giveaway is None or giveaway.status != "published":
+    if (
+        challenge is None
+        or challenge.user_id != message.from_user.id
+        or giveaway is None
+        or giveaway.status != "published"
+    ):
         await state.clear()
         await message.answer("Проверка устарела. Нажмите кнопку участия еще раз.")
         return

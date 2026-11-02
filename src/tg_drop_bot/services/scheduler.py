@@ -8,6 +8,7 @@ from aiogram import Bot
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tg_drop_bot.config import Settings
+from tg_drop_bot.services.captcha import cleanup_captcha_challenges
 from tg_drop_bot.services.giveaways import (
     due_published_giveaways,
     finish_giveaway,
@@ -53,9 +54,20 @@ class GiveawayScheduler:
             await asyncio.sleep(self.settings.scheduler_interval_seconds)
 
     async def tick(self) -> None:
+        await self._cleanup_captchas()
         await self._refresh_counters()
         await self._finish_due_giveaways()
         await self._resume_unfinished_results()
+
+    async def _cleanup_captchas(self) -> None:
+        async with self.session_factory() as session:
+            try:
+                deleted = await cleanup_captcha_challenges(session)
+                await session.commit()
+                if deleted:
+                    logger.info("Deleted %s obsolete captcha challenges", deleted)
+            except Exception:
+                logger.exception("Captcha cleanup failed")
 
     async def _refresh_counters(self) -> None:
         async with self.session_factory() as session:

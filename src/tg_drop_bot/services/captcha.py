@@ -7,11 +7,11 @@ from dataclasses import dataclass
 from datetime import timedelta
 
 from captcha.image import ImageCaptcha
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tg_drop_bot.config import Settings
-from tg_drop_bot.db.models import CaptchaChallenge
+from tg_drop_bot.db.models import CaptchaChallenge, Giveaway
 from tg_drop_bot.services.dates import utc_now
 
 CAPTCHA_ALPHABET = "".join(ch for ch in string.ascii_uppercase + string.digits if ch not in "0O1I")
@@ -144,17 +144,19 @@ async def verify_captcha_answer(
 ) -> CaptchaVerification:
     now = utc_now()
     if challenge.status == "solved":
+        await session.delete(challenge)
+        await session.flush()
         return CaptchaVerification(ok=True, reason="already_solved")
     if challenge.cooldown_until and challenge.cooldown_until > now:
         return CaptchaVerification(ok=False, reason="cooldown")
-    if challenge.expires_at <= now:
-        challenge.status = "expired"
+    if challenge.status != "pending" or challenge.expires_at <= now:
+        await session.delete(challenge)
         await session.flush()
         return CaptchaVerification(ok=False, reason="expired")
 
     if hash_captcha_answer(answer, settings) == challenge.answer_hash:
-        challenge.status = "solved"
-        challenge.solved_at = now
+        # The caller commits this deletion together with participant registration.
+        await session.delete(challenge)
         await session.flush()
         return CaptchaVerification(ok=True, reason="ok")
 
@@ -165,3 +167,36 @@ async def verify_captcha_answer(
         challenge.cooldown_until = now + timedelta(seconds=settings.captcha_cooldown_seconds)
     await session.flush()
     return CaptchaVerification(ok=False, reason="wrong", attempts_left=attempts_left)
+
+
+async def cleanup_captcha_challenges(session: AsyncSession, *, batch_size: int = 1000) -> int:
+    now = utc_now()
+    open_giveaway = select(Giveaway.id).where(
+        Giveaway.id == CaptchaChallenge.giveaway_id,
+        Giveaway.status == "published",
+        Giveaway.deadline_at > now,
+    ).exists()
+    obsolete = or_(
+        CaptchaChallenge.status.in_(["solved", "expired"]),
+        and_(CaptchaChallenge.status == "pending", CaptchaChallenge.expires_at <= now),
+        and_(
+            CaptchaChallenge.status == "failed",
+            or_(
+                CaptchaChallenge.cooldown_until.is_(None),
+                CaptchaChallenge.cooldown_until <= now,
+            ),
+        ),
+        ~open_giveaway,
+    )
+    # Skip answers and refreshes currently being processed in another transaction.
+    ids = list((await session.scalars(
+        select(CaptchaChallenge.id)
+        .where(obsolete)
+        .order_by(CaptchaChallenge.id)
+        .limit(batch_size)
+        .with_for_update(skip_locked=True)
+    )).all())
+    if not ids:
+        return 0
+    await session.execute(delete(CaptchaChallenge).where(CaptchaChallenge.id.in_(ids)))
+    return len(ids)
