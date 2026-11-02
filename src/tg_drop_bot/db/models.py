@@ -7,7 +7,9 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     DateTime,
+    Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -68,6 +70,8 @@ class Giveaway(Base, TimestampMixin):
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    anti_abuse_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    results_announced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     channel: Mapped[KnownChannel | None] = relationship(back_populates="giveaways")
     participants: Mapped[list[Participant]] = relationship(back_populates="giveaway")
@@ -91,6 +95,15 @@ class Participant(Base, TimestampMixin):
     membership_status: Mapped[str] = mapped_column(String(32), default="member", nullable=False)
     membership_checked_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+    selection_weight: Mapped[float] = mapped_column(Float, default=1.0, server_default="1")
+    selection_reason: Mapped[str] = mapped_column(
+        String(64), default="unknown", server_default="unknown"
+    )
+    draw_excluded: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    exclusion_reason: Mapped[str | None] = mapped_column(Text)
+    membership_next_check_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
     )
 
     giveaway: Mapped[Giveaway] = relationship(back_populates="participants")
@@ -140,3 +153,53 @@ class AuditLog(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class MembershipEvent(Base):
+    __tablename__ = "membership_events"
+    __table_args__ = (
+        Index("ix_membership_events_history", "channel_id", "user_id", "occurred_at"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    update_id: Mapped[int] = mapped_column(BigInteger, unique=True)
+    channel_id: Mapped[int] = mapped_column(ForeignKey("known_channels.id"))
+    user_id: Mapped[int] = mapped_column(BigInteger)
+    kind: Mapped[str] = mapped_column(String(16))
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class ChannelMembership(Base):
+    __tablename__ = "channel_memberships"
+    __table_args__ = (UniqueConstraint("channel_id", "user_id", name="uq_channel_membership_user"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    channel_id: Mapped[int] = mapped_column(ForeignKey("known_channels.id"))
+    user_id: Mapped[int] = mapped_column(BigInteger)
+    status: Mapped[str] = mapped_column(String(16))
+    last_event_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_update_id: Mapped[int] = mapped_column(BigInteger)
+
+
+class ChannelExclusion(Base):
+    __tablename__ = "channel_exclusions"
+    __table_args__ = (UniqueConstraint("channel_id", "user_id", name="uq_channel_exclusion_user"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    channel_id: Mapped[int] = mapped_column(ForeignKey("known_channels.id"))
+    user_id: Mapped[int] = mapped_column(BigInteger)
+    reason: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    evidence_event_id: Mapped[int | None] = mapped_column(ForeignKey("membership_events.id"))
+
+
+class ChannelExclusionPeriod(Base):
+    __tablename__ = "channel_exclusion_periods"
+    __table_args__ = (Index("ix_exclusion_period_history", "channel_id", "user_id", "started_at"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    channel_id: Mapped[int] = mapped_column(ForeignKey("known_channels.id"))
+    user_id: Mapped[int] = mapped_column(BigInteger)
+    reason: Mapped[str] = mapped_column(Text)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

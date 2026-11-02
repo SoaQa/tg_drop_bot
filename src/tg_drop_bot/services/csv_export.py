@@ -20,6 +20,10 @@ def participants_to_csv(participants: list[Participant]) -> bytes:
             "капча_пройдена",
             "статус_членства",
             "членство_проверено",
+            "вес_заявки",
+            "основание_веса",
+            "допуск_к_выбору",
+            "причина_исключения",
         ]
     )
     for participant in participants:
@@ -35,6 +39,11 @@ def participants_to_csv(participants: list[Participant]) -> bytes:
                 participant.membership_checked_at.isoformat()
                 if participant.membership_checked_at
                 else "",
+                participant.selection_weight if participant.selection_weight is not None else 1,
+                {"newcomer": "Подписался после начала", "unknown": "Равные условия"}.get(
+                    participant.selection_reason or "unknown", "Равные условия"),
+                "Исключён" if participant.draw_excluded else "Допущен",
+                participant.exclusion_reason or "",
             ]
         )
     return buffer.getvalue().encode("utf-8-sig")

@@ -20,6 +20,7 @@ from tg_drop_bot.config import Settings
 from tg_drop_bot.db.models import AuditLog, Giveaway, KnownChannel, Participant, Winner
 from tg_drop_bot.services.conditions import ConditionCheck, check_participant_conditions
 from tg_drop_bot.services.dates import utc_now
+from tg_drop_bot.services.membership import snapshot_draw_eligibility
 from tg_drop_bot.services.rendering import (
     channel_post_link,
     giveaway_title,
@@ -195,9 +196,7 @@ async def list_giveaways_by_status(
     current_admin_ids: set[int],
 ) -> list[Giveaway]:
     query = (
-        select(Giveaway)
-        .options(selectinload(Giveaway.channel))
-        .where(Giveaway.status == status)
+        select(Giveaway).options(selectinload(Giveaway.channel)).where(Giveaway.status == status)
     )
     if admin_user_id in current_admin_ids:
         query = query.where(
@@ -319,6 +318,7 @@ async def publish_giveaway(
         ) from error
 
     giveaway.message_id = message.message_id
+    giveaway.anti_abuse_enabled = True
     await add_audit(
         session,
         "giveaway.published",
@@ -560,6 +560,24 @@ def pick_winners(participants: list[Participant], winners_count: int) -> list[Pa
     return random.SystemRandom().sample(participants, count)
 
 
+def pick_weighted_winners(
+    participants: list[Participant],
+    winners_count: int,
+) -> list[Participant]:
+    import numpy as np
+
+    if winners_count <= 0 or not participants:
+        return []
+    weights = np.array([p.selection_weight for p in participants], dtype=float)
+    indices = np.random.default_rng().choice(
+        len(participants),
+        size=min(winners_count, len(participants)),
+        replace=False,
+        p=weights / weights.sum(),
+    )
+    return [participants[int(i)] for i in indices]
+
+
 async def finish_giveaway(
     session: AsyncSession,
     bot: Bot,
@@ -657,17 +675,21 @@ async def draw_and_record_winners(
     finish and the scheduler's resume sweep can never both record a winner
     set: the loser discards its draw and returns the persisted winners.
     """
+    if giveaway.anti_abuse_enabled and giveaway.results_state in {
+        RESULTS_STATE_DRAWN,
+        RESULTS_STATE_ANNOUNCED,
+    }:
+        return await list_winner_participants(session, giveaway.id)
     participants = await list_participants(session, giveaway.id)
+    eligible_participants = await snapshot_draw_eligibility(session, giveaway, participants)
     valid_participants: list[Participant] = []
     check_failures = 0
     now = utc_now()
-    for participant in participants:
+    for participant in eligible_participants:
         condition_check = await check_participant_conditions(bot, giveaway, participant.user_id)
         if condition_check.membership_status == "check_failed":
             # Retry once: single flaky API call must not disqualify a participant.
-            condition_check = await check_participant_conditions(
-                bot, giveaway, participant.user_id
-            )
+            condition_check = await check_participant_conditions(bot, giveaway, participant.user_id)
         participant.membership_status = condition_check.membership_status
         participant.membership_checked_at = now
         if condition_check.ok:
@@ -677,8 +699,15 @@ async def draw_and_record_winners(
             # подписку он уже подтверждал при регистрации.
             check_failures += 1
             valid_participants.append(participant)
+        else:
+            participant.draw_excluded = True
+            participant.exclusion_reason = "Не выполнено условие подписки на канал"
 
-    selected = pick_winners(valid_participants, giveaway.winners_count or 0)
+    selected = (
+        pick_weighted_winners(valid_participants, giveaway.winners_count or 0)
+        if giveaway.anti_abuse_enabled
+        else pick_winners(valid_participants, giveaway.winners_count or 0)
+    )
 
     claimed = await try_results_state_transition(
         session,
@@ -708,6 +737,8 @@ async def draw_and_record_winners(
             "participants": len(participants),
             "valid_participants": len(valid_participants),
             "membership_check_failures": check_failures,
+            "shadow_excluded": len(participants) - len(eligible_participants),
+            "newcomers": sum(p.selection_reason == "newcomer" for p in participants),
             "winners": len(selected),
         },
     )
@@ -770,6 +801,17 @@ async def publish_giveaway_results(
             )
     if announced:
         giveaway.results_state = RESULTS_STATE_ANNOUNCED
+        if giveaway.anti_abuse_enabled:
+            # Coalesce in SQL keeps the first success stable under concurrent retries.
+            await session.execute(
+                update(Giveaway)
+                .where(Giveaway.id == giveaway.id)
+                .values(
+                    results_announced_at=func.coalesce(Giveaway.results_announced_at, utc_now())
+                )
+            )
+        elif giveaway.results_announced_at is None:
+            giveaway.results_announced_at = utc_now()
         await add_audit(
             session,
             "giveaway.results.announced",

@@ -36,7 +36,7 @@ def admin_main_keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="Создать розыгрыш")],
             [KeyboardButton(text="Активные"), KeyboardButton(text="Черновики")],
             [KeyboardButton(text="Завершенные"), KeyboardButton(text="Отмененные")],
-            [KeyboardButton(text="Каналы")],
+            [KeyboardButton(text="Каналы"), KeyboardButton(text="Исключения")],
         ],
         resize_keyboard=True,
     )
@@ -197,6 +197,9 @@ def giveaway_card_keyboard(giveaway: Giveaway) -> InlineKeyboardMarkup:
                 )
             ]
         )
+    rows.append([InlineKeyboardButton(
+        text="Защита розыгрыша", callback_data=f"anti:giveaway:{giveaway.id}"
+    )])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

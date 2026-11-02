@@ -57,7 +57,7 @@ def test_finished_giveaway_card_keyboard_has_no_edit_buttons() -> None:
     keyboard = giveaway_card_keyboard(Giveaway(id=1, creator_user_id=1, status="finished"))
     labels = [button.text for row in keyboard.inline_keyboard for button in row]
 
-    assert labels == ["Список участников"]
+    assert labels == ["Список участников", "Защита розыгрыша"]
 
 
 def test_draft_giveaway_card_keyboard_has_delete_button() -> None:

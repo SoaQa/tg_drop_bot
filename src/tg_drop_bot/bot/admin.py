@@ -12,6 +12,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from tg_drop_bot.bot.exclusions import router as exclusions_router
 from tg_drop_bot.bot.keyboards import (
     CHANNEL_REQUEST_ID,
     admin_main_keyboard,
@@ -58,6 +59,8 @@ from tg_drop_bot.services.rendering import (
 )
 
 router = Router(name="admin")
+
+router.include_router(exclusions_router)
 
 
 def parse_edit_callback_data(data: str | None) -> tuple[str, int] | None:

@@ -16,6 +16,7 @@ from tg_drop_bot.services.giveaways import (
     refresh_published_giveaway_messages,
     resume_unfinished_results,
 )
+from tg_drop_bot.services.membership import cleanup_membership_events, reconcile_one
 
 logger = logging.getLogger(__name__)
 
@@ -31,19 +32,43 @@ class GiveawayScheduler:
         self.session_factory = session_factory
         self.bot = bot
         self._task: asyncio.Task[None] | None = None
+        self._membership_task: asyncio.Task[None] | None = None
         self._last_rendered_counts: dict[int, int] = {}
 
     def start(self) -> None:
         if self._task is None:
             self._task = asyncio.create_task(self._run(), name="giveaway-scheduler")
+            self._membership_task = asyncio.create_task(
+                self._run_membership(), name="membership-monitor"
+            )
 
     async def stop(self) -> None:
+        if self._membership_task is not None:
+            self._membership_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._membership_task
+            self._membership_task = None
         if self._task is None:
             return
         self._task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await self._task
         self._task = None
+
+    async def _run_membership(self) -> None:
+        while True:
+            try:
+                async with self.session_factory() as session:
+                    await cleanup_membership_events(session)
+                    await session.commit()
+                # Each check checkpoints separately and yields to deadline processing.
+                for _ in range(1000):
+                    if not await reconcile_one(self.session_factory, self.bot):
+                        break
+                    await asyncio.sleep(0.5)
+            except Exception:
+                logger.exception("Membership monitoring failed")
+            await asyncio.sleep(30)
 
     async def _run(self) -> None:
         while True:

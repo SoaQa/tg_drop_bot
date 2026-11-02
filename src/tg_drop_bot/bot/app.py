@@ -41,7 +41,7 @@ async def run_bot() -> None:
     rate_limiter = RedisRateLimiter(settings)
 
     if settings.telegram_mode == "polling":
-        await bot.delete_webhook(drop_pending_updates=True)
+        await bot.delete_webhook(drop_pending_updates=False)
         scheduler.start()
         try:
             await dispatcher.start_polling(
