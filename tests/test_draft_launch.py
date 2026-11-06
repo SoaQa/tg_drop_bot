@@ -7,9 +7,12 @@ from aiogram.types import Message
 
 from tg_drop_bot.bot import admin
 from tg_drop_bot.bot.keyboards import draft_preview_keyboard, giveaway_card_keyboard
+from tg_drop_bot.bot.states import DraftStates
 from tg_drop_bot.config import Settings
 from tg_drop_bot.db.models import Giveaway, KnownChannel
 from tg_drop_bot.services.dates import utc_now
+from tg_drop_bot.services.giveaways import PHOTO_CAPTION_LIMIT, giveaway_post_length_error
+from tg_drop_bot.services.rendering import render_giveaway_post
 
 
 @pytest.fixture
@@ -95,6 +98,87 @@ async def test_incomplete_preview_explains_missing_fields(draft) -> None:
     assert "условия" in menu.args[0]
     assert "draft:publish:5" not in callback_data(menu.kwargs["reply_markup"])
     assert "giveaway:view:5" in callback_data(menu.kwargs["reply_markup"])
+
+
+def test_photo_caption_reserves_room_for_participant_count_and_deadline(draft) -> None:
+    settings = Settings()
+    draft.image_file_id = "photo-id"
+    draft.post_text = "а"
+    size = len(render_giveaway_post(draft, settings, participants_count=2**63 - 1))
+    draft.post_text += "а" * (PHOTO_CAPTION_LIMIT - size)
+    assert giveaway_post_length_error(draft, settings) is None
+    deadline = draft.deadline_at
+    draft.deadline_at = None
+    assert giveaway_post_length_error(draft, settings) is None
+    draft.deadline_at = deadline
+    draft.post_text += "а"
+    assert len(render_giveaway_post(draft, settings, participants_count=0)) < PHOTO_CAPTION_LIMIT
+    assert giveaway_post_length_error(draft, settings)
+    draft.deadline_at = None
+    assert giveaway_post_length_error(draft, settings)
+    draft.image_file_id = None
+    assert giveaway_post_length_error(draft, settings) is None
+
+
+async def test_long_photo_caption_blocks_preview_and_publish_button(draft) -> None:
+    draft.image_file_id = "photo-id"
+    draft.post_text = "а" * PHOTO_CAPTION_LIMIT
+    message = AsyncMock()
+
+    await admin.show_draft_preview(message, draft, Settings())
+
+    message.answer_photo.assert_not_awaited()
+    message.answer.assert_awaited_once()
+    menu = message.answer.call_args
+    assert "Подпись к картинке слишком длинная" in menu.args[0]
+    assert "draft:publish:5" not in callback_data(menu.kwargs["reply_markup"])
+
+
+@pytest.mark.parametrize("too_long", [False, True])
+async def test_draft_image_checks_caption_before_saving(monkeypatch, draft, too_long) -> None:
+    if too_long:
+        draft.post_text = "а" * PHOTO_CAPTION_LIMIT
+    message = AsyncMock(photo=[SimpleNamespace(file_id="photo-id")])
+    state = AsyncMock(get_data=AsyncMock(return_value={"giveaway_id": 5}))
+    session = AsyncMock()
+    monkeypatch.setattr(admin, "get_giveaway", AsyncMock(return_value=draft))
+
+    await admin.draft_image(message, state, session, Settings())
+
+    if too_long:
+        assert draft.image_file_id is None
+        session.commit.assert_not_awaited()
+        state.set_state.assert_not_awaited()
+        buttons = callback_data(message.answer.call_args.kwargs["reply_markup"])
+        assert "draft:image:edit_description" in buttons
+        assert "draft:image:skip" in buttons
+    else:
+        assert draft.image_file_id == "photo-id"
+        session.commit.assert_awaited_once()
+        state.set_state.assert_awaited_once_with(DraftStates.deadline)
+
+
+@pytest.mark.parametrize("status", ["draft", "published"])
+async def test_long_photo_caption_is_not_saved_on_edit(monkeypatch, draft, status) -> None:
+    draft.status = status
+    draft.image_file_id = "photo-id"
+    message = AsyncMock(
+        from_user=SimpleNamespace(id=1), text="а" * PHOTO_CAPTION_LIMIT
+    )
+    state = AsyncMock(get_data=AsyncMock(return_value={"giveaway_id": 5}))
+    session = AsyncMock()
+    update_post = AsyncMock()
+    monkeypatch.setattr(admin, "get_giveaway", AsyncMock(return_value=draft))
+    monkeypatch.setattr(admin, "count_participants", AsyncMock(return_value=1))
+    monkeypatch.setattr(admin, "edit_published_message", update_post)
+
+    await admin.edit_text(message, state, session, Settings(ADMIN_IDS="1"), AsyncMock())
+
+    session.rollback.assert_awaited_once()
+    session.commit.assert_not_awaited()
+    update_post.assert_not_awaited()
+    state.clear.assert_not_awaited()
+    assert "Подпись к картинке слишком длинная" in message.answer.call_args.args[0]
 
 
 @pytest.mark.parametrize("status", ["published", "finished", "cancelled"])

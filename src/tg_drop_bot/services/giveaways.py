@@ -38,6 +38,7 @@ logger = logging.getLogger(__name__)
 # Telegram limits: 1024 characters for photo captions, 4096 for plain messages.
 PHOTO_CAPTION_LIMIT = 1024
 MESSAGE_TEXT_LIMIT = 4096
+GIVEAWAY_TITLE_LIMIT = 255
 
 RESULTS_STATE_PENDING = "pending"
 RESULTS_STATE_DRAWN = "drawn"
@@ -245,6 +246,35 @@ def validate_draft(giveaway: Giveaway) -> list[str]:
     return missing
 
 
+def giveaway_post_length_error(
+    giveaway: Giveaway,
+    settings: Settings,
+    *,
+    with_photo: bool | None = None,
+    participants_count: int = 0,
+) -> str | None:
+    has_photo = bool(giveaway.image_file_id) if with_photo is None else with_photo
+    # PostgreSQL COUNT returns bigint; leave room for all of its decimal digits.
+    count = 2**63 - 1 if has_photo else participants_count
+    text = render_giveaway_post(giveaway, settings, participants_count=count)
+    length = len(text)
+    if has_photo:
+        if giveaway.deadline_at is None:
+            length += len("00.00.0000 00:00") - len("не задано")
+        if length > PHOTO_CAPTION_LIMIT:
+            return (
+                f"Подпись к картинке слишком длинная: лимит {PHOTO_CAPTION_LIMIT} символов "
+                f"вместе с условиями и запасом для счётчика участников (сейчас {length}). "
+                "Сократите название или описание."
+            )
+    elif length > MESSAGE_TEXT_LIMIT:
+        return (
+            f"Пост не может быть длиннее {MESSAGE_TEXT_LIMIT} символов (сейчас {length}). "
+            "Сократите описание."
+        )
+    return None
+
+
 async def publish_giveaway(
     session: AsyncSession,
     bot: Bot,
@@ -264,18 +294,9 @@ async def publish_giveaway(
     if missing:
         raise RuntimeError("Draft is incomplete: " + ", ".join(missing))
 
+    if length_error := giveaway_post_length_error(giveaway, settings):
+        raise PublishGiveawayError(length_error)
     text = render_giveaway_post(giveaway, settings, participants_count=0)
-    if giveaway.image_file_id and len(text) > PHOTO_CAPTION_LIMIT:
-        raise PublishGiveawayError(
-            "Пост с картинкой не может быть длиннее "
-            f"{PHOTO_CAPTION_LIMIT} символов (сейчас {len(text)}). "
-            "Сократите описание или уберите картинку."
-        )
-    if len(text) > MESSAGE_TEXT_LIMIT:
-        raise PublishGiveawayError(
-            f"Пост не может быть длиннее {MESSAGE_TEXT_LIMIT} символов (сейчас {len(text)}). "
-            "Сократите описание."
-        )
 
     claimed = await try_status_transition(
         session,

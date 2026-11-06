@@ -71,12 +71,13 @@ def channels_keyboard(channels: list[KnownChannel]) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def draft_image_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="Пропустить", callback_data="draft:image:skip")]
-        ]
-    )
+def draft_image_keyboard(*, can_edit_description: bool = False) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    if can_edit_description:
+        builder.button(text="Сократить описание", callback_data="draft:image:edit_description")
+    builder.button(text="Пропустить", callback_data="draft:image:skip")
+    builder.adjust(1)
+    return builder.as_markup()
 
 
 def draft_conditions_keyboard() -> InlineKeyboardMarkup:

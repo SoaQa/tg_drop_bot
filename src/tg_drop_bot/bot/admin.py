@@ -33,8 +33,7 @@ from tg_drop_bot.services.access import can_manage_giveaway, is_admin
 from tg_drop_bot.services.conditions import CHANNEL_SUBSCRIPTION_CONDITION, condition_label
 from tg_drop_bot.services.dates import parse_admin_deadline, utc_now
 from tg_drop_bot.services.giveaways import (
-    MESSAGE_TEXT_LIMIT,
-    PHOTO_CAPTION_LIMIT,
+    GIVEAWAY_TITLE_LIMIT,
     PublishGiveawayError,
     add_audit,
     build_csv_file,
@@ -44,6 +43,7 @@ from tg_drop_bot.services.giveaways import (
     edit_published_message,
     finish_giveaway,
     get_giveaway,
+    giveaway_post_length_error,
     list_available_channels,
     list_giveaways_by_status,
     publish_giveaway,
@@ -137,21 +137,37 @@ async def draft_title(message: Message, state: FSMContext, session: AsyncSession
     if giveaway is None or not message.text:
         await message.answer("Введите название сообщением.")
         return
-    giveaway.title = message.text.strip()
+    title = message.text.strip()
+    if len(title) > GIVEAWAY_TITLE_LIMIT:
+        await message.answer(f"Название не может быть длиннее {GIVEAWAY_TITLE_LIMIT} символов.")
+        return
+    giveaway.title = title
     await session.commit()
     await state.set_state(DraftStates.post_text)
     await message.answer("Введите описание розыгрыша.")
 
 
 @router.message(DraftStates.post_text)
-async def draft_post_text(message: Message, state: FSMContext, session: AsyncSession) -> None:
+async def draft_post_text(
+    message: Message, state: FSMContext, session: AsyncSession, settings: Settings
+) -> None:
     data = await state.get_data()
     giveaway = await get_giveaway(session, data["giveaway_id"])
     if giveaway is None or not message.text:
         await message.answer("Введите описание сообщением.")
         return
     giveaway.post_text = message.text.strip()
+    if error := giveaway_post_length_error(giveaway, settings):
+        await session.rollback()
+        await message.answer(error)
+        return
     await session.commit()
+    if giveaway.terms_text and giveaway.winners_count:
+        await state.set_state(DraftStates.image)
+        await message.answer(
+            "Отправьте картинку для поста или пропустите шаг.", reply_markup=draft_image_keyboard()
+        )
+        return
     await state.set_state(DraftStates.terms_text)
     await message.answer("Выберите условие участия.", reply_markup=draft_conditions_keyboard())
 
@@ -190,7 +206,9 @@ async def draft_image_skip(callback: CallbackQuery, state: FSMContext) -> None:
 
 
 @router.message(DraftStates.image)
-async def draft_image(message: Message, state: FSMContext, session: AsyncSession) -> None:
+async def draft_image(
+    message: Message, state: FSMContext, session: AsyncSession, settings: Settings
+) -> None:
     if not message.photo:
         await message.answer("Отправьте изображение или нажмите «Пропустить».")
         return
@@ -199,12 +217,22 @@ async def draft_image(message: Message, state: FSMContext, session: AsyncSession
     if giveaway is None:
         await message.answer("Черновик не найден.")
         return
+    if error := giveaway_post_length_error(giveaway, settings, with_photo=True):
+        await message.answer(error, reply_markup=draft_image_keyboard(can_edit_description=True))
+        return
     giveaway.image_file_id = message.photo[-1].file_id
     await session.commit()
     await state.set_state(DraftStates.deadline)
     await message.answer(
         "Введите дедлайн в формате ДД.ММ.ГГГГ ЧЧ:ММ, например 25.06.2026 18:30."
     )
+
+
+@router.callback_query(DraftStates.image, F.data == "draft:image:edit_description")
+async def draft_image_edit_description(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(DraftStates.post_text)
+    await callback.message.answer("Введите сокращённое описание розыгрыша.")
+    await callback.answer()
 
 
 @router.message(DraftStates.winners_count)
@@ -256,33 +284,35 @@ async def draft_deadline(
 
 
 async def show_draft_preview(message: Message, giveaway: Giveaway, settings: Settings) -> None:
-    text = render_giveaway_post(giveaway, settings)
     missing = validate_draft(giveaway)
-    if giveaway.image_file_id and len(text) <= PHOTO_CAPTION_LIMIT:
-        await message.answer_photo(
-            giveaway.image_file_id,
-            caption=text,
-        )
-    elif len(text) <= MESSAGE_TEXT_LIMIT:
-        await message.answer(text)
-    else:
-        await message.answer("Пост слишком длинный для предпросмотра. Сократите описание.")
+    length_error = giveaway_post_length_error(giveaway, settings)
+    if not length_error:
+        text = render_giveaway_post(giveaway, settings)
+        if giveaway.image_file_id:
+            await message.answer_photo(giveaway.image_file_id, caption=text)
+        else:
+            await message.answer(text)
     channel_name = giveaway.channel.title if giveaway.channel else "не выбран"
     menu = (
         f"<b>Запуск розыгрыша #{giveaway.id}</b>\n"
         f"Канал: {html.escape(channel_name)}\n\n"
     )
-    if len(text) <= MESSAGE_TEXT_LIMIT:
+    if length_error:
+        menu += length_error + "\n"
+    else:
         menu += "Выше предпросмотр поста с текущими настройками.\n"
     if missing:
         menu += "Заполните перед запуском: " + ", ".join(missing) + "."
-    else:
+    elif not length_error:
         menu += (
             "Нажмите «Опубликовать и запустить», "
             "чтобы отправить пост в канал и открыть участие."
         )
     await message.answer(
-        menu, reply_markup=draft_preview_keyboard(giveaway.id, can_publish=not missing)
+        menu,
+        reply_markup=draft_preview_keyboard(
+            giveaway.id, can_publish=not missing and not length_error
+        ),
     )
 
 
@@ -639,16 +669,17 @@ async def update_text_field(
             reply_markup=admin_main_keyboard(),
         )
         return
-    setattr(giveaway, field, value.strip())
+    value = value.strip()
+    if field == "title" and len(value) > GIVEAWAY_TITLE_LIMIT:
+        await message.answer(f"Название не может быть длиннее {GIVEAWAY_TITLE_LIMIT} символов.")
+        return
     participants_count = await count_participants(session, giveaway.id)
-    rendered = render_giveaway_post(giveaway, settings, participants_count=participants_count)
-    limit = PHOTO_CAPTION_LIMIT if giveaway.image_file_id else MESSAGE_TEXT_LIMIT
-    if len(rendered) > limit:
+    setattr(giveaway, field, value)
+    if error := giveaway_post_length_error(
+        giveaway, settings, participants_count=participants_count
+    ):
         await session.rollback()
-        await message.answer(
-            f"Слишком длинный текст: пост получится {len(rendered)} символов "
-            f"при лимите {limit}. Сократите текст."
-        )
+        await message.answer(error)
         return
     post_updated = True
     try:
@@ -706,8 +737,12 @@ async def edit_deadline(
             reply_markup=admin_main_keyboard(),
         )
         return
-    giveaway.deadline_at = deadline
     participants_count = await count_participants(session, giveaway.id)
+    giveaway.deadline_at = deadline
+    if giveaway.image_file_id and (error := giveaway_post_length_error(giveaway, settings)):
+        await session.rollback()
+        await message.answer(error)
+        return
     with contextlib.suppress(TelegramAPIError):
         await edit_published_message(
             bot,
@@ -753,8 +788,12 @@ async def edit_winners(
             reply_markup=admin_main_keyboard(),
         )
         return
-    giveaway.winners_count = count
     participants_count = await count_participants(session, giveaway.id)
+    giveaway.winners_count = count
+    if giveaway.image_file_id and (error := giveaway_post_length_error(giveaway, settings)):
+        await session.rollback()
+        await message.answer(error)
+        return
     with contextlib.suppress(TelegramAPIError):
         await edit_published_message(
             bot,
