@@ -81,6 +81,9 @@ def test_render_results_announcement_lists_winners() -> None:
     assert '2. <a href="tg://user?id=200">Имя</a>' in text
     assert "Поздравляем победителей!" in text
     assert "меньше призовых мест" not in text
+    assert "автоматизированная система с антифрод-проверками" in text
+    assert "бота обратной связи" in text
+    assert "t.me/" not in text
 
 
 def test_render_results_announcement_without_winners() -> None:

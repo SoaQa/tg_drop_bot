@@ -35,6 +35,7 @@ from tg_drop_bot.services.giveaways import (
     register_participant_after_condition_check,
     single_giveaway_or_none,
 )
+from tg_drop_bot.services.membership import PARTICIPATION_DENIED, get_active_exclusion
 
 router = Router(name="participant")
 
@@ -133,6 +134,12 @@ async def start_captcha_flow(
         await message.answer("Прием заявок в этом розыгрыше уже закрыт, подводим итоги.")
         return
 
+    if giveaway.channel_id is not None and await get_active_exclusion(
+        session, giveaway.channel_id, participant_user.id
+    ):
+        await message.answer(PARTICIPATION_DENIED)
+        return
+
     condition_check = await check_participant_conditions(bot, giveaway, participant_user.id)
     if not condition_check.ok:
         await message.answer(condition_check.user_message or "Условия участия не выполнены.")
@@ -194,6 +201,13 @@ async def refresh_captcha_callback(
     giveaway = await get_giveaway(session, challenge.giveaway_id)
     if giveaway is None or not is_giveaway_open(giveaway):
         await callback.answer("Розыгрыш сейчас недоступен.", show_alert=True)
+        return
+
+    if giveaway.channel_id is not None and await get_active_exclusion(
+        session, giveaway.channel_id, callback.from_user.id
+    ):
+        await callback.answer()
+        await callback.message.answer(PARTICIPATION_DENIED)
         return
 
     condition_check = await check_participant_conditions(bot, giveaway, callback.from_user.id)
@@ -346,6 +360,12 @@ async def process_captcha_answer(
         await message.answer("Прием заявок в этом розыгрыше уже закрыт, подводим итоги.")
         return
 
+    if giveaway.channel_id is not None and await get_active_exclusion(
+        session, giveaway.channel_id, message.from_user.id
+    ):
+        await state.clear()
+        await message.answer(PARTICIPATION_DENIED)
+        return
     verification = await verify_captcha_answer(session, settings, challenge, message.text)
     if not verification.ok:
         await session.commit()

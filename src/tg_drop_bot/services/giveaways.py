@@ -20,7 +20,12 @@ from tg_drop_bot.config import Settings
 from tg_drop_bot.db.models import AuditLog, Giveaway, KnownChannel, Participant, Winner
 from tg_drop_bot.services.conditions import ConditionCheck, check_participant_conditions
 from tg_drop_bot.services.dates import utc_now
-from tg_drop_bot.services.membership import snapshot_draw_eligibility
+from tg_drop_bot.services.membership import (
+    PARTICIPATION_DENIED,
+    get_active_exclusion,
+    lock_user,
+    snapshot_draw_eligibility,
+)
 from tg_drop_bot.services.rendering import (
     channel_post_link,
     giveaway_title,
@@ -534,6 +539,15 @@ async def register_participant_after_condition_check(
             condition_check=condition_check,
         )
 
+    if giveaway.channel_id is not None:
+        await lock_user(session, giveaway.channel_id, user.id)
+        if await get_active_exclusion(session, giveaway.channel_id, user.id) is not None:
+            return ParticipantRegistration(
+                participant=None, created=False,
+                condition_check=ConditionCheck(
+                    ok=False, membership_status="excluded", user_message=PARTICIPATION_DENIED
+                ),
+            )
     participant, created = await register_participant(session, giveaway, user)
     participant.membership_status = condition_check.membership_status
     participant.membership_checked_at = utc_now()
