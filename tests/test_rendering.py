@@ -1,3 +1,5 @@
+import pytest
+
 from tg_drop_bot.config import Settings
 from tg_drop_bot.db.models import Giveaway
 from tg_drop_bot.services.dates import utc_now
@@ -52,6 +54,39 @@ def test_render_giveaway_post_does_not_duplicate_title_as_description() -> None:
     assert text.count("Routerich AX3000") == 1
 
 
+@pytest.mark.parametrize(("status", "count"), [("draft", 0), ("published", 1250)])
+def test_active_template_keeps_description_and_adds_antifraud_notice(
+    status: str, count: int
+) -> None:
+    giveaway = Giveaway(
+        id=1, creator_user_id=1, status=status, title="Тестовый приз",
+        post_text="Мой текст\n\n1) Мои условия", terms_text="Подписка на канал",
+        winners_count=2, deadline_at=utc_now(),
+    )
+    text = render_giveaway_post(giveaway, Settings(), participants_count=count)
+    assert "<b>Тестовый приз</b>\nМой текст\n\n1) Мои условия" in text
+    assert f"<b>Участников:</b> {count}" in text
+    assert text.index("антифрод-проверками") > text.index("<b>Завершение:</b>")
+    assert text.endswith("указанного в описании канала.")
+    assert "шансы на победу" not in text
+
+
+@pytest.mark.parametrize(
+    ("status", "closed", "footer"),
+    [
+        ("finished", False, "Участие закрыто."),
+        ("published", True, "Участие закрыто."),
+        ("cancelled", True, "Розыгрыш отменен."),
+    ],
+)
+def test_closed_post_replaces_antifraud_notice(status: str, closed: bool, footer: str) -> None:
+    giveaway = Giveaway(id=1, creator_user_id=1, status=status, post_text="Мой текст")
+    text = render_giveaway_post(giveaway, Settings(), closed=closed)
+    assert "Мой текст" in text
+    assert text.endswith(footer)
+    assert "антифрод" not in text
+
+
 def test_render_results_announcement_lists_winners() -> None:
     from tg_drop_bot.db.models import Participant
     from tg_drop_bot.services.rendering import render_results_announcement
@@ -81,8 +116,8 @@ def test_render_results_announcement_lists_winners() -> None:
     assert '2. <a href="tg://user?id=200">Имя</a>' in text
     assert "Поздравляем победителей!" in text
     assert "меньше призовых мест" not in text
-    assert "автоматизированная система с антифрод-проверками" in text
-    assert "бота обратной связи" in text
+    assert "антифрод" not in text
+    assert "бота обратной связи" not in text
     assert "t.me/" not in text
 
 

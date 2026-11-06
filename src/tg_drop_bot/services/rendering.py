@@ -10,6 +10,12 @@ from tg_drop_bot.services.dates import format_admin_datetime
 # в лимит Telegram на 4096 символов.
 MAX_ANNOUNCED_WINNERS = 50
 
+ACTIVE_GIVEAWAY_NOTICE = (
+    "Победителей выбирает автоматизированная система с антифрод-проверками "
+    "для защиты от ботов. Если ваше участие заблокировано и вы не согласны с решением, "
+    "напишите через бота обратной связи, указанного в описании канала."
+)
+
 GIVEAWAY_STATUS_LABELS = {
     "draft": "черновик",
     "published": "опубликован",
@@ -47,6 +53,7 @@ def render_giveaway_post(
     closed: bool = False,
     participants_count: int | None = None,
 ) -> str:
+    closed = closed or giveaway.status == "finished"
     title = giveaway_title(giveaway)
     parts = [
         f"<b>{'Розыгрыш завершен: ' if closed else ''}{html.escape(title)}</b>",
@@ -68,6 +75,8 @@ def render_giveaway_post(
         parts.extend(["", "Розыгрыш отменен."])
     elif closed:
         parts.extend(["", "Участие закрыто."])
+    elif giveaway.status in {"draft", "published"}:
+        parts.extend(["", ACTIVE_GIVEAWAY_NOTICE])
     return "\n".join(parts).strip()
 
 
@@ -110,12 +119,6 @@ def render_results_announcement(giveaway: Giveaway, winners: list[Participant]) 
         lines.extend(["", "Поздравляем победителей!"])
     else:
         lines.extend(["", "Победителей нет: не нашлось валидных участников."])
-    lines.extend([
-        "",
-        "Победителей выбирает автоматизированная система с антифрод-проверками "
-        "для защиты от ботов. Если ваше участие заблокировано и вы не согласны с решением, "
-        "напишите через бота обратной связи, указанного в описании канала.",
-    ])
     return "\n".join(lines)
 
 

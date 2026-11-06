@@ -258,19 +258,22 @@ async def draft_deadline(
 async def show_draft_preview(message: Message, giveaway: Giveaway, settings: Settings) -> None:
     text = render_giveaway_post(giveaway, settings)
     missing = validate_draft(giveaway)
-    if giveaway.image_file_id:
+    if giveaway.image_file_id and len(text) <= PHOTO_CAPTION_LIMIT:
         await message.answer_photo(
             giveaway.image_file_id,
             caption=text,
         )
-    else:
+    elif len(text) <= MESSAGE_TEXT_LIMIT:
         await message.answer(text)
+    else:
+        await message.answer("Пост слишком длинный для предпросмотра. Сократите описание.")
     channel_name = giveaway.channel.title if giveaway.channel else "не выбран"
     menu = (
         f"<b>Запуск розыгрыша #{giveaway.id}</b>\n"
         f"Канал: {html.escape(channel_name)}\n\n"
-        "Выше — предпросмотр поста с текущими настройками.\n"
     )
+    if len(text) <= MESSAGE_TEXT_LIMIT:
+        menu += "Выше предпросмотр поста с текущими настройками.\n"
     if missing:
         menu += "Заполните перед запуском: " + ", ".join(missing) + "."
     else:
