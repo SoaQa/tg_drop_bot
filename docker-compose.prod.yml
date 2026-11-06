@@ -54,6 +54,19 @@ services:
       - caddy_config:/config
     restart: unless-stopped
 
+  worker:
+    profiles: ["participation-queue"]
+    image: ghcr.io/soaqa/tg_drop_bot:${IMAGE_TAG:-stable}
+    command: ["dramatiq", "tg_drop_bot.queue_worker:broker", "--processes", "1", "--threads", "6"]
+    env_file: .env
+    depends_on:
+      bot:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-tg_drop_bot}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-tg_drop_bot}
+      REDIS_URL: redis://redis:6379/0
+    restart: unless-stopped
+
   watchtower:
     image: containrrr/watchtower:1.7.1
     command: --label-enable --cleanup --interval 300

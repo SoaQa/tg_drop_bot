@@ -72,6 +72,8 @@ class Giveaway(Base, TimestampMixin):
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     anti_abuse_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     results_announced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    intake_closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    drain_alerted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     channel: Mapped[KnownChannel | None] = relationship(back_populates="giveaways")
     participants: Mapped[list[Participant]] = relationship(back_populates="giveaway")
@@ -153,6 +155,45 @@ class AuditLog(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class ParticipationFlow(Base):
+    __tablename__ = "participation_flows"
+    __table_args__ = (
+        UniqueConstraint("giveaway_id", "user_id", name="uq_participation_flow_user"),
+        Index("ix_participation_flows_user_id", "user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    giveaway_id: Mapped[int] = mapped_column(ForeignKey("giveaways.id", ondelete="CASCADE"))
+    user_id: Mapped[int] = mapped_column(BigInteger)
+    user_profile: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    status: Mapped[str] = mapped_column(String(16))
+    challenge_id: Mapped[int | None] = mapped_column(Integer)
+    answer_hash: Mapped[str | None] = mapped_column(String(64))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cooldown_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+
+
+class ParticipationJob(Base):
+    __tablename__ = "participation_jobs"
+    __table_args__ = (
+        Index("ix_participation_jobs_flow_id", "flow_id", "id"),
+        Index("ix_participation_jobs_dispatch_at", "dispatch_at", "id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    update_id: Mapped[int] = mapped_column(BigInteger, unique=True)
+    flow_id: Mapped[int] = mapped_column(ForeignKey("participation_flows.id", ondelete="CASCADE"))
+    kind: Mapped[str] = mapped_column(String(16))
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    dispatch_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    answer_hash: Mapped[str | None] = mapped_column(String(64))
+    challenge_id: Mapped[int | None] = mapped_column(Integer)
+    reply_text: Mapped[str | None] = mapped_column(Text)
+    failures: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
 
 class MembershipEvent(Base):

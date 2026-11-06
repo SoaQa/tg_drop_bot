@@ -52,6 +52,7 @@ from tg_drop_bot.services.giveaways import (
     upsert_known_channel,
     validate_draft,
 )
+from tg_drop_bot.services.participation_queue import lock_giveaway_intake
 from tg_drop_bot.services.rendering import (
     channel_post_link,
     render_giveaway_card,
@@ -737,6 +738,18 @@ async def edit_deadline(
             reply_markup=admin_main_keyboard(),
         )
         return
+    if settings.participation_queue_enabled:
+        locked = await lock_giveaway_intake(session, giveaway.id)
+        if locked is None or locked.status not in {"draft", "published"} or (
+            locked.intake_closed_at is not None
+            or (locked.status == "published" and locked.deadline_at
+                and locked.deadline_at <= utc_now())
+        ):
+            await session.rollback()
+            await state.clear()
+            await message.answer("Приём заявок закрыт. Дедлайн уже нельзя изменить.")
+            return
+        await session.refresh(giveaway, attribute_names=["channel"])
     participants_count = await count_participants(session, giveaway.id)
     giveaway.deadline_at = deadline
     if giveaway.image_file_id and (error := giveaway_post_length_error(giveaway, settings)):
@@ -940,6 +953,11 @@ async def finish_confirm(
         actor_user_id=callback.from_user.id,
         manual=True,
     )
+    if result.draining:
+        await callback.answer(
+            "Приём закрыт. Сначала проверим все принятые заявки.", show_alert=True
+        )
+        return
     if not result.finished:
         await callback.answer(
             "Не получилось: розыгрыш уже завершен или отменен.", show_alert=True

@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import cast
 
@@ -124,7 +124,10 @@ async def test_register_participant_after_condition_check_keeps_membership_statu
         session: AsyncSession,
         giveaway: Giveaway,
         user: User,
+        *,
+        received_at: datetime | None = None,
     ) -> tuple[Participant, bool]:
+        assert received_at is None
         return participant, True
 
     monkeypatch.setattr(

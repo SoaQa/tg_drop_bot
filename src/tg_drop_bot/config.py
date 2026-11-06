@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     rate_limit_user_updates: int = Field(default=50, alias="RATE_LIMIT_USER_UPDATES")
     rate_limit_user_window_seconds: int = Field(default=60, alias="RATE_LIMIT_USER_WINDOW_SECONDS")
     rate_limit_participate_seconds: int = Field(default=5, alias="RATE_LIMIT_PARTICIPATE_SECONDS")
+    participation_queue_enabled: bool = Field(default=False, alias="PARTICIPATION_QUEUE_ENABLED")
+    participation_queue_rate: int = Field(default=50, ge=1, alias="PARTICIPATION_QUEUE_RATE")
+    participation_queue_burst: int = Field(default=100, ge=1, alias="PARTICIPATION_QUEUE_BURST")
 
     @cached_property
     def admin_id_set(self) -> set[int]:
@@ -67,6 +70,14 @@ class Settings(BaseSettings):
             raise RuntimeError("BOT_TOKEN is required")
         if not self.admin_id_set:
             raise RuntimeError("ADMIN_IDS must contain at least one Telegram user ID")
+        if self.participation_queue_enabled and (
+            self.telegram_mode != "webhook" or not self.redis_url
+        ):
+            raise RuntimeError("The participation queue requires webhook mode and Redis")
+        if self.participation_queue_enabled and (
+            not self.app_secret_key or self.app_secret_key == "dev-change-me"
+        ):
+            raise RuntimeError("The participation queue requires a private APP_SECRET_KEY")
         if self.telegram_mode == "webhook":
             if not self.webhook_url:
                 raise RuntimeError("WEBHOOK_URL is required in webhook mode")

@@ -4,7 +4,7 @@ import html
 import logging
 import random
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any, cast
 
 from aiogram import Bot
@@ -25,6 +25,10 @@ from tg_drop_bot.services.membership import (
     get_active_exclusion,
     lock_user,
     snapshot_draw_eligibility,
+)
+from tg_drop_bot.services.participation_queue import (
+    giveaway_has_pending_intake,
+    lock_giveaway_intake,
 )
 from tg_drop_bot.services.rendering import (
     channel_post_link,
@@ -65,6 +69,7 @@ class ParticipantRegistration:
 class FinishResult:
     finished: bool
     winners: list[Participant] = field(default_factory=list)
+    draining: bool = False
 
 
 async def add_audit(
@@ -217,7 +222,11 @@ async def list_published_giveaways(session: AsyncSession) -> list[Giveaway]:
     result = await session.execute(
         select(Giveaway)
         .options(selectinload(Giveaway.channel))
-        .where(Giveaway.status == "published")
+        .where(
+            Giveaway.status == "published",
+            Giveaway.intake_closed_at.is_(None),
+            or_(Giveaway.deadline_at.is_(None), Giveaway.deadline_at > utc_now()),
+        )
         .order_by(Giveaway.deadline_at.asc(), Giveaway.created_at.desc())
     )
     return list(result.scalars().all())
@@ -370,8 +379,10 @@ async def edit_published_message(
         settings,
         participants_count=participants_count,
     )
-    me = await bot.me()
-    keyboard = participation_keyboard(giveaway.id, me.username)
+    keyboard = None
+    if giveaway.intake_closed_at is None:
+        me = await bot.me()
+        keyboard = participation_keyboard(giveaway.id, me.username)
     try:
         if giveaway.image_file_id:
             await bot.edit_message_caption(
@@ -416,7 +427,10 @@ async def replace_published_image(
                 participants_count=participants_count,
             ),
         ),
-        reply_markup=participation_keyboard(giveaway.id, (await bot.me()).username),
+        reply_markup=(
+            participation_keyboard(giveaway.id, (await bot.me()).username)
+            if giveaway.intake_closed_at is None else None
+        ),
     )
 
 
@@ -497,6 +511,8 @@ async def register_participant(
     session: AsyncSession,
     giveaway: Giveaway,
     user: User,
+    *,
+    received_at: datetime | None = None,
 ) -> tuple[Participant, bool]:
     result = await session.execute(
         select(Participant).where(
@@ -515,8 +531,8 @@ async def register_participant(
         username=user.username,
         first_name=user.first_name,
         last_name=user.last_name,
-        joined_at=now,
-        captcha_passed_at=now,
+        joined_at=received_at or now,
+        captcha_passed_at=received_at or now,
         membership_status="member",
         membership_checked_at=now,
     )
@@ -551,6 +567,8 @@ async def register_participant_after_condition_check(
     bot: Bot,
     giveaway: Giveaway,
     user: User,
+    *,
+    received_at: datetime | None = None,
 ) -> ParticipantRegistration:
     condition_check = await check_participant_conditions(bot, giveaway, user.id)
     if not condition_check.ok:
@@ -560,6 +578,17 @@ async def register_participant_after_condition_check(
             condition_check=condition_check,
         )
 
+    if received_at is not None:
+        status = await session.scalar(select(Giveaway.status).where(
+            Giveaway.id == giveaway.id
+        ).with_for_update(read=True))
+        if status != "published":
+            return ParticipantRegistration(
+                participant=None, created=False, condition_check=ConditionCheck(
+                    ok=False, membership_status="closed",
+                    user_message="Приём заявок в этом розыгрыше уже закрыт.",
+                ),
+            )
     if giveaway.channel_id is not None:
         await lock_user(session, giveaway.channel_id, user.id)
         if await get_active_exclusion(session, giveaway.channel_id, user.id) is not None:
@@ -569,7 +598,9 @@ async def register_participant_after_condition_check(
                     ok=False, membership_status="excluded", user_message=PARTICIPATION_DENIED
                 ),
             )
-    participant, created = await register_participant(session, giveaway, user)
+    participant, created = await register_participant(
+        session, giveaway, user, received_at=received_at
+    )
     participant.membership_status = condition_check.membership_status
     participant.membership_checked_at = utc_now()
     return ParticipantRegistration(
@@ -633,6 +664,48 @@ async def finish_giveaway(
     await ensure_channel_loaded(session, giveaway)
     if giveaway.status != "published" or giveaway.channel is None:
         return FinishResult(finished=False)
+
+    if settings.participation_queue_enabled or giveaway.intake_closed_at is not None:
+        locked = await lock_giveaway_intake(session, giveaway.id)
+        if locked is None or locked.status != "published":
+            await session.rollback()
+            return FinishResult(finished=False)
+        await ensure_channel_loaded(session, giveaway)
+        now = utc_now()
+        newly_closed = locked.intake_closed_at is None
+        cutoff = min(now, locked.deadline_at) if locked.deadline_at else now
+        locked.intake_closed_at = locked.intake_closed_at or cutoff
+        # First persist the cutoff. Webhooks that arrived just before it can
+        # commit while the giveaway is draining, before the next scheduler pass.
+        settling = now - locked.intake_closed_at < timedelta(seconds=2)
+        if newly_closed or settling or await giveaway_has_pending_intake(
+            session, locked.id, now=now
+        ):
+            notify = (
+                locked.drain_alerted_at is None
+                and now - locked.intake_closed_at >= timedelta(minutes=5)
+            )
+            if notify:
+                locked.drain_alerted_at = now
+            await session.commit()
+            if newly_closed:
+                try:
+                    await edit_published_message(
+                        bot, settings, giveaway,
+                        participants_count=await count_participants(session, giveaway.id),
+                    )
+                except TelegramAPIError:
+                    logger.warning("Could not update closed intake post: %s", giveaway.id)
+            if notify:
+                try:
+                    await bot.send_message(
+                        giveaway.creator_user_id,
+                        f"Розыгрыш #{giveaway.id}: ещё проверяем принятые заявки. "
+                        "Итоги будут опубликованы после обработки.",
+                    )
+                except TelegramAPIError:
+                    logger.warning("Could not notify creator of slow intake: %s", giveaway.id)
+            return FinishResult(finished=False, draining=True)
 
     await add_audit(
         session,
@@ -989,7 +1062,10 @@ async def resume_unfinished_results(
 
 def is_giveaway_open(giveaway: Giveaway) -> bool:
     """Whether the giveaway still accepts participants (published, deadline not passed)."""
-    if giveaway.status != "published" or giveaway.channel is None:
+    if (
+        giveaway.status != "published" or giveaway.channel is None
+        or giveaway.intake_closed_at is not None
+    ):
         return False
     return giveaway.deadline_at is None or giveaway.deadline_at > utc_now()
 
@@ -998,7 +1074,10 @@ async def due_published_giveaways(session: AsyncSession) -> list[Giveaway]:
     result = await session.execute(
         select(Giveaway)
         .options(selectinload(Giveaway.channel))
-        .where(Giveaway.status == "published", Giveaway.deadline_at <= utc_now())
+        .where(
+            Giveaway.status == "published",
+            or_(Giveaway.deadline_at <= utc_now(), Giveaway.intake_closed_at.is_not(None)),
+        )
         .order_by(Giveaway.deadline_at.asc())
     )
     return list(result.scalars().all())

@@ -222,13 +222,14 @@ def active_giveaways_keyboard(giveaways: list[Giveaway]) -> InlineKeyboardMarkup
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def captcha_keyboard(challenge_id: int) -> InlineKeyboardMarkup:
+def captcha_keyboard(challenge_id: int, *, queued: bool = False) -> InlineKeyboardMarkup:
+    prefix = "queue:refresh" if queued else "captcha:refresh"
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text="Обновить капчу",
-                    callback_data=f"captcha:refresh:{challenge_id}",
+                    callback_data=f"{prefix}:{challenge_id}",
                 )
             ]
         ]

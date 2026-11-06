@@ -257,6 +257,23 @@ wheels = [
 ]
 
 [[package]]
+name = "dramatiq"
+version = "1.18.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "prometheus-client" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d9/9f/c8be928a88c387ed27344de089278e76d893dc71ad9e4b2a39a61deab0d8/dramatiq-1.18.0.tar.gz", hash = "sha256:5ea436b6e50dae64d4de04f1eb519ad239a6b1ba6315ba1dce1c0c4c1ebedfaf", size = 100868 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ac/00/d9ea755cdeda3d498504775b62122b72ba282b91446fd58980171fb1084c/dramatiq-1.18.0-py3-none-any.whl", hash = "sha256:d360f608aa3cd06f5db714bfcd23825dc7098bacfee52aca536b0bb0faae3c69", size = 121231 },
+]
+
+[package.optional-dependencies]
+redis = [
+    { name = "redis" },
+]
+
+[[package]]
 name = "frozenlist"
 version = "1.8.0"
 source = { registry = "https://pypi.org/simple" }
@@ -895,6 +912,15 @@ wheels = [
 ]
 
 [[package]]
+name = "prometheus-client"
+version = "0.26.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/52/73/f1334c29c2af4cd9dba6c7817e61b611bd0215e2eb5565c6064a4de18802/prometheus_client-0.26.0.tar.gz", hash = "sha256:04a91bcf94e2cf74a44a1a874d651a2e853ed354b6e822f3b7487751465d5c2b", size = 92910 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/eb/a3/b69efbf4143b5b9859b977770bbbabcc2796b702fa69dc40271e45cd5a56/prometheus_client-0.26.0-py3-none-any.whl", hash = "sha256:fa93d06737aa02bacd05794768508bb97d2fbee28cb3bca04eaae92f0ca953d6", size = 64494 },
+]
+
+[[package]]
 name = "propcache"
 version = "0.5.2"
 source = { registry = "https://pypi.org/simple" }
@@ -1228,7 +1254,7 @@ asyncio = [
 
 [[package]]
 name = "tg-drop-bot"
-version = "0.13.0"
+version = "0.14.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiogram" },
@@ -1236,6 +1262,7 @@ dependencies = [
     { name = "alembic" },
     { name = "asyncpg" },
     { name = "captcha" },
+    { name = "dramatiq", extra = ["redis"] },
     { name = "numpy" },
     { name = "pydantic-settings" },
     { name = "python-dotenv" },
@@ -1259,6 +1286,7 @@ requires-dist = [
     { name = "alembic", specifier = ">=1.13,<2.0" },
     { name = "asyncpg", specifier = ">=0.29,<1.0" },
     { name = "captcha", specifier = ">=0.6,<1.0" },
+    { name = "dramatiq", extras = ["redis"], specifier = ">=1.18,<2" },
     { name = "numpy", specifier = ">=2.1,<3.0" },
     { name = "pydantic-settings", specifier = ">=2.4,<3.0" },
     { name = "python-dotenv", specifier = ">=1.0,<2.0" },

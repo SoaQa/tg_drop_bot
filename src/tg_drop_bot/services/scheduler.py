@@ -17,6 +17,7 @@ from tg_drop_bot.services.giveaways import (
     resume_unfinished_results,
 )
 from tg_drop_bot.services.membership import cleanup_membership_events
+from tg_drop_bot.services.participation_queue import cleanup_participation_queue
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,8 @@ class GiveawayScheduler:
         await self._resume_unfinished_results()
         async with self.session_factory() as session:
             await cleanup_membership_events(session)
+            if self.settings.participation_queue_enabled:
+                await cleanup_participation_queue(session)
             await session.commit()
 
     async def _cleanup_captchas(self) -> None:
