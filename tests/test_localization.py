@@ -28,6 +28,7 @@ def test_csv_export_is_user_facing_russian() -> None:
         joined_at=utc_now(),
         captcha_passed_at=utc_now(),
         membership_status="member",
+        selection_reason="newcomer_fast_captcha",
     )
 
     csv_text = participants_to_csv([participant]).decode("utf-8-sig")
@@ -35,3 +36,4 @@ def test_csv_export_is_user_facing_russian() -> None:
     assert "имя_пользователя" in csv_text
     assert "статус_членства" in csv_text
     assert "участник" in csv_text
+    assert "Подписался после начала и быстро ответил на капчу" in csv_text

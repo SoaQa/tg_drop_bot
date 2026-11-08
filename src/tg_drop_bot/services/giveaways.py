@@ -21,6 +21,8 @@ from tg_drop_bot.db.models import AuditLog, Giveaway, KnownChannel, Participant,
 from tg_drop_bot.services.conditions import ConditionCheck, check_participant_conditions
 from tg_drop_bot.services.dates import utc_now
 from tg_drop_bot.services.membership import (
+    FAST_CAPTCHA_WEIGHT_REASONS,
+    NEWCOMER_WEIGHT_REASONS,
     PARTICIPATION_DENIED,
     get_active_exclusion,
     lock_user,
@@ -846,7 +848,10 @@ async def draw_and_record_winners(
             "valid_participants": len(valid_participants),
             "membership_check_failures": check_failures,
             "shadow_excluded": len(participants) - len(eligible_participants),
-            "newcomers": sum(p.selection_reason == "newcomer" for p in participants),
+            "newcomers": sum(p.selection_reason in NEWCOMER_WEIGHT_REASONS for p in participants),
+            "fast_captcha": sum(
+                p.selection_reason in FAST_CAPTCHA_WEIGHT_REASONS for p in participants
+            ),
             "winners": len(selected),
         },
     )

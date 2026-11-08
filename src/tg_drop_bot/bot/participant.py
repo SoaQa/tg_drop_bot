@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 
 from aiogram import Bot, F, Router
 from aiogram.filters import CommandObject, CommandStart, StateFilter
@@ -20,6 +21,7 @@ from tg_drop_bot.config import Settings
 from tg_drop_bot.db.models import CaptchaChallenge, Participant
 from tg_drop_bot.services.access import is_admin
 from tg_drop_bot.services.captcha import (
+    captcha_response_ms,
     create_captcha_challenge,
     find_challenge_matching_answer,
     get_blocking_captcha_challenge,
@@ -28,6 +30,7 @@ from tg_drop_bot.services.captcha import (
     verify_captcha_answer,
 )
 from tg_drop_bot.services.conditions import check_participant_conditions
+from tg_drop_bot.services.dates import utc_now
 from tg_drop_bot.services.giveaways import (
     get_giveaway,
     is_giveaway_open,
@@ -168,7 +171,7 @@ async def start_captcha_flow(
         session, settings, giveaway.id, participant_user.id
     )
     await session.commit()
-    await send_captcha_challenge(message, state, challenge, image_bytes)
+    await send_captcha_challenge(message, state, session, challenge, image_bytes)
 
 
 @router.callback_query(F.data.startswith("captcha:refresh:"))
@@ -226,29 +229,35 @@ async def refresh_captcha_callback(
         challenge.user_id,
     )
     await session.commit()
-    await state.set_state(CaptchaStates.answer)
-    await state.update_data(challenge_id=new_challenge.id, giveaway_id=new_challenge.giveaway_id)
     await callback.answer("Капча обновлена.")
-    await callback.message.answer_photo(
-        BufferedInputFile(image_bytes, filename="captcha.png"),
+    await send_captcha_challenge(
+        callback.message,
+        state,
+        session,
+        new_challenge,
+        image_bytes,
         caption="Введите код с новой картинки. Капча действует несколько минут.",
-        reply_markup=captcha_keyboard(new_challenge.id),
     )
 
 
 async def send_captcha_challenge(
     message: Message,
     state: FSMContext,
+    session: AsyncSession,
     challenge: CaptchaChallenge,
     image_bytes: bytes,
+    *,
+    caption: str = "Введите код с картинки. Капча действует несколько минут.",
 ) -> None:
     await state.set_state(CaptchaStates.answer)
     await state.update_data(challenge_id=challenge.id, giveaway_id=challenge.giveaway_id)
     await message.answer_photo(
         BufferedInputFile(image_bytes, filename="captcha.png"),
-        caption="Введите код с картинки. Капча действует несколько минут.",
+        caption=caption,
         reply_markup=captcha_keyboard(challenge.id),
     )
+    challenge.captcha_sent_at = utc_now()
+    await session.commit()
 
 
 async def get_existing_participant(
@@ -275,6 +284,7 @@ async def captcha_answer(
     settings: Settings,
     bot: Bot,
 ) -> None:
+    received_at = utc_now()
     if message.from_user is None or not message.text:
         await message.answer("Введите код текстом.")
         return
@@ -286,7 +296,7 @@ async def captcha_answer(
         )
     else:
         challenge = await session.get(CaptchaChallenge, challenge_id)
-    await process_captcha_answer(message, state, session, settings, bot, challenge)
+    await process_captcha_answer(message, state, session, settings, bot, challenge, received_at)
 
 
 @router.message(StateFilter(None), F.chat.type == "private", F.text.regexp(r"^[A-Za-z0-9]{3,16}$"))
@@ -297,6 +307,7 @@ async def captcha_answer_without_state(
     settings: Settings,
     bot: Bot,
 ) -> None:
+    received_at = utc_now()
     if message.from_user is None or not message.text:
         return
     if not looks_like_captcha_answer(message.text):
@@ -306,7 +317,7 @@ async def captcha_answer_without_state(
     )
     if challenge is None:
         return
-    await process_captcha_answer(message, state, session, settings, bot, challenge)
+    await process_captcha_answer(message, state, session, settings, bot, challenge, received_at)
 
 
 async def find_stateless_challenge(
@@ -334,6 +345,7 @@ async def process_captcha_answer(
     settings: Settings,
     bot: Bot,
     challenge: CaptchaChallenge | None,
+    received_at: datetime,
 ) -> None:
     if message.from_user is None or not message.text:
         await message.answer("Введите код текстом.")
@@ -366,6 +378,7 @@ async def process_captcha_answer(
         await state.clear()
         await message.answer(PARTICIPATION_DENIED)
         return
+    response_ms = captcha_response_ms(challenge.captcha_sent_at, received_at)
     verification = await verify_captcha_answer(session, settings, challenge, message.text)
     if not verification.ok:
         await session.commit()
@@ -388,6 +401,12 @@ async def process_captcha_answer(
         giveaway,
         message.from_user,
     )
+    if (
+        verification.reason == "ok"
+        and registration.created
+        and registration.participant is not None
+    ):
+        registration.participant.captcha_response_ms = response_ms
     await session.commit()
     await state.clear()
     if registration.participant is None:

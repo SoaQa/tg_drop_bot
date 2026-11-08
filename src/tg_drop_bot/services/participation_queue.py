@@ -86,6 +86,7 @@ async def admit_start(
         flow.status = "waiting"
         flow.challenge_id = None
         flow.answer_hash = None
+        flow.captcha_sent_at = None
         flow.expires_at = None
         flow.cooldown_until = None
         flow.attempts = 0
@@ -311,5 +312,5 @@ async def cleanup_participation_queue(session: AsyncSession) -> None:
             )
             .exists(),
         )
-        .values(status="done", answer_hash=None)
+        .values(status="done", answer_hash=None, captcha_sent_at=None)
     )

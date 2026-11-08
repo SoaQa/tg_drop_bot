@@ -4,7 +4,7 @@ import hashlib
 import random
 import string
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from captcha.image import ImageCaptcha
 from sqlalchemy import and_, delete, or_, select
@@ -15,6 +15,13 @@ from tg_drop_bot.db.models import CaptchaChallenge, Giveaway
 from tg_drop_bot.services.dates import utc_now
 
 CAPTCHA_ALPHABET = "".join(ch for ch in string.ascii_uppercase + string.digits if ch not in "0O1I")
+FAST_CAPTCHA_THRESHOLD_MS = 2000
+
+
+def captcha_response_ms(sent_at: datetime | None, received_at: datetime) -> int | None:
+    if sent_at is None or received_at < sent_at:
+        return None
+    return (received_at - sent_at) // timedelta(milliseconds=1)
 
 
 @dataclass(frozen=True)

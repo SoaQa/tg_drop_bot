@@ -94,6 +94,7 @@ class Participant(Base, TimestampMixin):
     last_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     captcha_passed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    captcha_response_ms: Mapped[int | None] = mapped_column(Integer)
     membership_status: Mapped[str] = mapped_column(String(32), default="member", nullable=False)
     membership_checked_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -135,6 +136,7 @@ class CaptchaChallenge(Base, TimestampMixin):
     giveaway_id: Mapped[int] = mapped_column(ForeignKey("giveaways.id"), index=True, nullable=False)
     user_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
     answer_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    captcha_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="pending", index=True, nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -171,6 +173,7 @@ class ParticipationFlow(Base):
     status: Mapped[str] = mapped_column(String(16))
     challenge_id: Mapped[int | None] = mapped_column(Integer)
     answer_hash: Mapped[str | None] = mapped_column(String(64))
+    captcha_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     cooldown_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")

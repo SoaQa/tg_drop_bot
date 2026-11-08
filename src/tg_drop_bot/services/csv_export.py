@@ -6,6 +6,12 @@ from io import StringIO
 from tg_drop_bot.db.models import Participant
 from tg_drop_bot.services.rendering import membership_status_label
 
+WEIGHT_LABELS = {
+    "newcomer": "Подписался после начала",
+    "fast_captcha": "Быстро ответил на капчу",
+    "newcomer_fast_captcha": "Подписался после начала и быстро ответил на капчу",
+}
+
 
 def participants_to_csv(participants: list[Participant]) -> bytes:
     buffer = StringIO()
@@ -40,8 +46,7 @@ def participants_to_csv(participants: list[Participant]) -> bytes:
                 if participant.membership_checked_at
                 else "",
                 participant.selection_weight if participant.selection_weight is not None else 1,
-                {"newcomer": "Подписался после начала", "unknown": "Равные условия"}.get(
-                    participant.selection_reason or "unknown", "Равные условия"),
+                WEIGHT_LABELS.get(participant.selection_reason or "", "Равные условия"),
                 "Исключён" if participant.draw_excluded else "Допущен",
                 participant.exclusion_reason or "",
             ]

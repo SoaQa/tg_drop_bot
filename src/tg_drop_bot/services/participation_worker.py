@@ -15,7 +15,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from tg_drop_bot.bot.keyboards import captcha_keyboard
 from tg_drop_bot.config import Settings
 from tg_drop_bot.db.models import Giveaway, Participant, ParticipationFlow, ParticipationJob
-from tg_drop_bot.services.captcha import CAPTCHA_ALPHABET, hash_captcha_answer, render_captcha_png
+from tg_drop_bot.services.captcha import (
+    CAPTCHA_ALPHABET,
+    captcha_response_ms,
+    hash_captcha_answer,
+    render_captcha_png,
+)
 from tg_drop_bot.services.conditions import check_participant_conditions
 from tg_drop_bot.services.dates import utc_now
 from tg_drop_bot.services.giveaways import get_giveaway, register_participant_after_condition_check
@@ -52,6 +57,7 @@ def queued_captcha_code(settings: Settings, challenge_id: int) -> str:
 def close_flow(flow: ParticipationFlow) -> None:
     flow.status = "done"
     flow.answer_hash = None
+    flow.captcha_sent_at = None
     flow.expires_at = None
     flow.challenge_id = None
 
@@ -103,6 +109,7 @@ async def issue_captcha(
     flow.status = "captcha"
     flow.challenge_id = job.id
     flow.answer_hash = hash_captcha_answer(code, settings)
+    flow.captcha_sent_at = delivered_at
     flow.expires_at = expires_at
     # Refreshes change the picture, not the attempt budget.
     return None
@@ -139,6 +146,10 @@ async def handle_answer(
     registration = await register_participant_after_condition_check(
         session, bot, giveaway, User.model_validate(flow.user_profile), received_at=job.received_at
     )
+    if registration.created and registration.participant is not None:
+        registration.participant.captcha_response_ms = captcha_response_ms(
+            flow.captcha_sent_at, job.received_at
+        )
     close_flow(flow)
     if registration.participant is None:
         return registration.condition_check.user_message or "Условия участия не выполнены."

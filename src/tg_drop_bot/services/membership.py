@@ -15,6 +15,7 @@ from tg_drop_bot.db.models import (
     MembershipEvent,
     Participant,
 )
+from tg_drop_bot.services.captcha import FAST_CAPTCHA_THRESHOLD_MS
 from tg_drop_bot.services.dates import utc_now
 
 PARTICIPATION_DENIED = (
@@ -22,6 +23,16 @@ PARTICIPATION_DENIED = (
     "Если вы не согласны с решением, напишите через бота обратной связи, "
     "указанного в описании канала."
 )
+
+NEWCOMER_WEIGHT_REASONS = {"newcomer", "newcomer_fast_captcha"}
+FAST_CAPTCHA_WEIGHT_REASONS = {"fast_captcha", "newcomer_fast_captcha"}
+
+
+def draw_weight(is_newcomer: bool, response_ms: int | None) -> tuple[float, str]:
+    fast = response_ms is not None and 0 <= response_ms < FAST_CAPTCHA_THRESHOLD_MS
+    if is_newcomer:
+        return (0.35, "newcomer_fast_captcha") if fast else (0.7, "newcomer")
+    return (0.5, "fast_captcha") if fast else (1.0, "unknown")
 
 
 async def snapshot_draw_eligibility(
@@ -61,8 +72,10 @@ async def snapshot_draw_eligibility(
     }
     for participant in participants:
         is_newcomer = giveaway.anti_abuse_enabled and participant.user_id in newcomers
-        participant.selection_weight = 0.7 if is_newcomer else 1.0
-        participant.selection_reason = "newcomer" if is_newcomer else "unknown"
+        response_ms = participant.captcha_response_ms if giveaway.anti_abuse_enabled else None
+        participant.selection_weight, participant.selection_reason = draw_weight(
+            is_newcomer, response_ms
+        )
         exclusion = exclusions.get(participant.user_id)
         participant.draw_excluded = exclusion is not None
         participant.exclusion_reason = exclusion.reason if exclusion else None

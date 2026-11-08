@@ -28,7 +28,7 @@ from tg_drop_bot.db.models import (
     ParticipationFlow,
     ParticipationJob,
 )
-from tg_drop_bot.services import giveaways
+from tg_drop_bot.services import giveaways, participation_worker
 from tg_drop_bot.services.captcha import hash_captcha_answer
 from tg_drop_bot.services.dates import utc_now
 from tg_drop_bot.services.participation_limits import ParticipationLimits, QueuePressure
@@ -148,10 +148,11 @@ async def test_draw_waits_for_accepted_request_and_late_captcha(
             select(ParticipationFlow).where(ParticipationFlow.giveaway_id == giveaway_id)
         )
         assert flow is not None and flow.expires_at is not None
+        assert flow.captcha_sent_at is not None
         assert flow.expires_at > utc_now() + timedelta(seconds=295)
         assert await giveaway_has_pending_intake(session, giveaway_id, now=utc_now())
         code = queued_captcha_code(settings, job_id)
-        received_at = utc_now() - timedelta(seconds=2)
+        received_at = flow.captcha_sent_at + timedelta(milliseconds=1500)
         assert (
             await admit_captcha_action(
                 session,
@@ -175,22 +176,26 @@ async def test_draw_waits_for_accepted_request_and_late_captcha(
             == "duplicate"
         )
         # The answer was on time, even if processing starts after the challenge expires.
-        flow.expires_at = utc_now() - timedelta(seconds=1)
+        flow.expires_at = received_at + timedelta(milliseconds=1)
+        processed_at = flow.expires_at + timedelta(seconds=3)
         answer_id = await session.scalar(
             select(ParticipationJob.id).where(ParticipationJob.update_id == update_id + 3)
         )
         assert answer_id is not None
-        assert await giveaway_has_pending_intake(session, giveaway_id, now=utc_now())
+        assert await giveaway_has_pending_intake(session, giveaway_id, now=processed_at)
 
+    monkeypatch.setattr(participation_worker, "utc_now", lambda: processed_at)
     await process_participation_job(sessions, bot, settings, answer_id)
     await process_participation_job(sessions, bot, settings, answer_id)
     bot.send_message.assert_awaited_once_with(user.id, "Готово, участие засчитано.")
     monkeypatch.setattr(giveaways, "utc_now", lambda: utc_now() + timedelta(seconds=3))
     async with sessions() as session:
-        joined = await session.scalar(
-            select(Participant.joined_at).where(Participant.giveaway_id == giveaway_id)
+        participant = await session.scalar(
+            select(Participant).where(Participant.giveaway_id == giveaway_id)
         )
-        assert joined == received_at
+        assert participant is not None
+        assert participant.joined_at == received_at
+        assert participant.captcha_response_ms == 1500
         giveaway = await giveaways.get_giveaway(session, giveaway_id)
         assert giveaway is not None
         result = await giveaways.finish_giveaway(

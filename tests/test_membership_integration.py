@@ -113,8 +113,15 @@ async def test_leave_after_results_is_recorded_without_excluding_user(
 
     assert await snapshot_draw_eligibility(s, g, [p]) == [p]
     assert p.selection_weight == 0.7
+    p.captcha_response_ms = 1500
+    assert await snapshot_draw_eligibility(s, g, [p]) == [p]
+    assert p.selection_weight == 0.35
+    assert p.selection_reason == "newcomer_fast_captcha"
     g.published_at = now
     g.finished_at = now + timedelta(hours=1)
+    assert await snapshot_draw_eligibility(s, g, [p]) == [p]
+    assert p.selection_weight == 0.5
+    g.anti_abuse_enabled = False
     assert await snapshot_draw_eligibility(s, g, [p]) == [p]
     assert p.selection_weight == 1
 
