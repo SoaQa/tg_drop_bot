@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import html
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -15,6 +15,11 @@ from tg_drop_bot.bot.keyboards import parse_callback_int as parse_callback_integ
 from tg_drop_bot.config import Settings
 from tg_drop_bot.db.models import ChannelExclusion, KnownChannel, Participant
 from tg_drop_bot.services.access import can_manage_giveaway, is_admin
+from tg_drop_bot.services.exclusion_identity import (
+    parse_exclusion_target,
+    resolve_exclusion_username,
+    verify_username,
+)
 from tg_drop_bot.services.giveaways import get_giveaway
 from tg_drop_bot.services.membership import prohibit_participation, revoke_channel_exclusion
 
@@ -168,34 +173,47 @@ async def prohibit_start(
     await state.set_state(ExclusionSearch.prohibit_id)
     await state.update_data(prohibit_channel_id=channel_id)
     await callback.answer()
-    await callback.message.answer("Введите Telegram ID пользователя, которому запрещаете участие.")
+    await callback.message.answer("Введите @имя пользователя или числовой Telegram ID.")
 
 
 @router.message(ExclusionSearch.prohibit_id)
-async def prohibit_preview(message: Message, state: FSMContext, settings: Settings) -> None:
+async def prohibit_preview(
+    message: Message, state: FSMContext, settings: Settings, session: AsyncSession, bot: Bot
+) -> None:
     if not message.from_user or not is_admin(message.from_user.id, settings):
         return
-    value = (message.text or "").strip()
-    if not (value.isascii() and value.isdecimal() and len(value) <= 16):
-        await message.answer("Введите числовой Telegram ID.")
-        return
-    user_id = int(value)
-    if not 0 < user_id < 2**52:
-        await message.answer("Введите корректный Telegram ID.")
+    target = parse_exclusion_target(message.text or "")
+    if target is None:
+        await message.answer("Введите корректное @имя пользователя или числовой Telegram ID.")
         return
     data = await state.get_data()
     channel_id = data.get("prohibit_channel_id")
-    if channel_id is None:
+    channel = await session.get(KnownChannel, channel_id) if channel_id is not None else None
+    if channel is None:
         await state.clear()
         await message.answer("Выберите канал заново.")
         return
+    username = target if isinstance(target, str) else None
+    if isinstance(target, str):
+        user = await resolve_exclusion_username(session, bot, channel.telegram_chat_id, target)
+        if user is None:
+            await message.answer(
+                "Не удалось подтвердить владельца этого имени. Проверьте написание "
+                "или введите числовой Telegram ID."
+            )
+            return
+        user_id = user.id
+        label = f"@{html.escape(user.username or target)} (ID: <code>{user_id}</code>)"
+    else:
+        user_id = target
+        label = f"<code>{user_id}</code>"
     await state.set_state(ExclusionSearch.confirm_prohibition)
-    await state.update_data(prohibit_user_id=user_id)
+    await state.update_data(prohibit_user_id=user_id, prohibit_username=username)
     keyboard = InlineKeyboardBuilder()
     keyboard.button(text="Да, запретить", callback_data=f"anti:block:{channel_id}:{user_id}")
     keyboard.button(text="Отмена", callback_data="anti:block_cancel")
     await message.answer(
-        f"Запретить участие пользователю <code>{user_id}</code> в выбранном канале?",
+        f"Запретить участие пользователю {label} в канале «{html.escape(channel.title)}»?",
         reply_markup=keyboard.as_markup(),
     )
 
@@ -208,7 +226,7 @@ async def prohibit_cancel(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(ExclusionSearch.confirm_prohibition, F.data.startswith("anti:block:"))
 async def prohibit_confirm(
-    callback: CallbackQuery, state: FSMContext, session: AsyncSession, settings: Settings
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession, settings: Settings, bot: Bot
 ) -> None:
     if not is_admin(callback.from_user.id, settings):
         await callback.answer("Нет доступа.", show_alert=True)
@@ -222,6 +240,18 @@ async def prohibit_confirm(
     ):
         await callback.answer("Кнопка устарела.")
         return
+    if username := data.get("prohibit_username"):
+        channel = await session.get(KnownChannel, channel_id)
+        if channel is None or not await verify_username(
+            bot, channel.telegram_chat_id, user_id, username
+        ):
+            await state.set_state(ExclusionSearch.prohibit_id)
+            await state.update_data(prohibit_user_id=None, prohibit_username=None)
+            await callback.answer(
+                "Не удалось подтвердить имя. Введите @имя или Telegram ID заново.",
+                show_alert=True,
+            )
+            return
     changed = await prohibit_participation(session, channel_id, user_id, callback.from_user.id)
     await session.commit()
     await state.clear()

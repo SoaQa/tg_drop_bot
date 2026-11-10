@@ -21,8 +21,10 @@ from tg_drop_bot.db.models import (
     KnownChannel,
     MembershipEvent,
     Participant,
+    ParticipationFlow,
 )
 from tg_drop_bot.services.dates import utc_now
+from tg_drop_bot.services.exclusion_identity import username_candidates
 from tg_drop_bot.services.membership import (
     cleanup_membership_events,
     get_active_exclusion,
@@ -81,6 +83,30 @@ async def seed(session: AsyncSession) -> tuple[KnownChannel, Giveaway, Participa
     session.add(participant)
     await session.flush()
     return channel, giveaway, participant
+
+
+async def test_username_candidates_include_pending_applications_and_deduplicate(
+    membership_session: AsyncSession,
+) -> None:
+    session = membership_session
+    _, giveaway, participant = await seed(session)
+    participant.username = "RaffleSample"
+    session.add_all([
+        ParticipationFlow(
+            giveaway_id=giveaway.id, user_id=participant.user_id,
+            user_profile={"username": "RAFFLESAMPLE"}, status="waiting",
+        ),
+        ParticipationFlow(
+            giveaway_id=giveaway.id, user_id=99,
+            user_profile={"username": "rafflesample"}, status="waiting",
+        ),
+        ParticipationFlow(
+            giveaway_id=giveaway.id, user_id=100, user_profile={}, status="waiting",
+        ),
+    ])
+    await session.flush()
+    assert set(await username_candidates(session, "rafflesample")) == {participant.user_id, 99}
+    assert await username_candidates(session, "missing") == []
 
 
 async def test_leave_after_results_is_recorded_without_excluding_user(
