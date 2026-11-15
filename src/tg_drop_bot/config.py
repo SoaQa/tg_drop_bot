@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     app_secret_key: str = Field(default="dev-change-me", alias="APP_SECRET_KEY")
     frog_game_enabled: bool = Field(default=False, alias="FROG_GAME_ENABLED")
     free_game_enabled: bool = Field(default=False, alias="FREE_GAME_ENABLED")
+    free_game_path: Literal["/play", "/test/play"] = Field(
+        default="/play", alias="FREE_GAME_PATH",
+    )
 
     telegram_mode: Literal["polling", "webhook"] = Field(default="polling", alias="TELEGRAM_MODE")
     webhook_url: str = Field(default="", alias="WEBHOOK_URL")

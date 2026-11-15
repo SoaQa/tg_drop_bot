@@ -3,14 +3,14 @@ import {createRoot} from 'react-dom/client';
 import {drawWind} from './wind.mjs';
 
 const tg=window.Telegram?.WebApp;
-const freeMode=location.pathname.startsWith('/play/');
+const freeMode=location.pathname.endsWith('/play/');
 tg?.ready(); tg?.expand(); tg?.disableVerticalSwipes?.();
 function App(){
  const [game,setGame]=useState(null),[message,setMessage]=useState('Доведите лягушку до верхнего берега.'),[busy,setBusy]=useState(false);
  const current=useRef(null),pending=useRef(false),canvas=useRef(null),sync=useRef(0),queuedTap=useRef(false);
  const gid=new URLSearchParams(location.search).get('giveaway');
  async function call(action,extra){
-  const r=await fetch((freeMode?'/play/api/':'/test/api/game/')+action,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({initData:tg?.initData||'',...extra})});
+  const r=await fetch((freeMode?location.pathname+'api/':'/test/api/game/')+action,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({initData:tg?.initData||'',...extra})});
   if(!r.ok) throw new Error(await r.text());
   return r.json();
  }

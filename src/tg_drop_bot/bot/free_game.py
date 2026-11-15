@@ -12,7 +12,9 @@ router = Router(name="free_game")
 async def open_free_game(message: Message, settings: Settings, bot: Bot) -> None:
     if message.chat.type == "private":
         button = InlineKeyboardButton(
-            text="Играть", web_app=WebAppInfo(url=f"{settings.webhook_url}/play/"),
+            text="Играть", web_app=WebAppInfo(
+                url=f"{settings.webhook_url}{settings.free_game_path}/",
+            ),
         )
     else:
         me = await bot.get_me()
