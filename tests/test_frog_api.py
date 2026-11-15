@@ -87,7 +87,8 @@ async def test_api_rejects_fake_success_wrong_owner_replays_and_records_real_fin
     bot = AsyncMock()
     app = web.Application()
     settings = Settings(
-        BOT_TOKEN=TOKEN, PARTICIPATION_QUEUE_ENABLED=queued, WEBHOOK_URL="https://example.test",
+        BOT_TOKEN=TOKEN, FROG_GAME_ENABLED=True, PARTICIPATION_QUEUE_ENABLED=queued,
+        WEBHOOK_URL="https://example.test",
     )
     frog_web.register_game_routes(app, settings, sessions, bot)
     try:
