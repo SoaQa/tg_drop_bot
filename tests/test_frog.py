@@ -198,6 +198,8 @@ def test_hard_lasers_solvable_and_easy_has_no_lasers(monkeypatch):
         easy = new_game({}, 1, 1000)
         assert easy['difficulty'] == 'easy'
         assert easy['rows'] <= 7
+        assert all(abs(lane['speed']) <= (.675 if lane['kind']=='car' else .3375)
+                   for lane in easy['lanes'])
         assert all('laser' not in lane for lane in easy['lanes'])
         hard = new_game({}, 1, 1000, difficulty='hard')
         assert hard['rows'] == 9 and hard['difficulty'] == 'hard'

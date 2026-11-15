@@ -11,12 +11,12 @@ from urllib.parse import parse_qsl
 # All traffic repeats after 20 seconds. Two cars per road lane leave readable gaps.
 TRAFFIC_PERIOD = 20.0
 FALLBACK_PHASES = {
-    (1, 2): [4, 7.69, 6.18, 6.61],
-    (1, 3): [4, 7.41, 6.72, 2.86, 7.24],
-    (2, 1): [4, 5.48, 1.29, 3.12],
-    (2, 2): [4, 4.96, 2.39, 7.77, 7.28],
+    (1, 2): [4, 3.07, 1.82, 6.12],
+    (1, 3): [4, 7.89, 4.96, 6.63, 6.24],
+    (2, 1): [4, 5.4, 1.58, 4.48],
+    (2, 2): [4, 0.95, 6.06, 5.98, 1.66],
     (2, 3): [4, 4.05, 0.05, 3.85, 1.11, 3.8],
-    (3, 1): [4, 0.54, 2.73, 2.29, 5.55],
+    (3, 1): [4, 7.87, 7.45, 2.06, 0.33],
     (3, 2): [4, 7.32, 8.99, 3.95, 5.43, 0.62],
     (3, 3): [4, 5.28, 4.32, 1.49, 0.01, 1.13, 4.99],
 }
@@ -29,6 +29,7 @@ def _rush_band_blocked(lanes: list[dict], low: float, high: float) -> bool:
     forbidden delay intervals over the entire hop band, then union all lanes.
     Narrower collision margins make coverage conservative, including boundaries.
     """
+    cycle = 9 / abs(next(lane for lane in lanes if lane['kind'] == 'mower')['speed'])
     intervals = []
     for lane in lanes:
         speed = abs(lane['speed'])
@@ -37,19 +38,22 @@ def _rush_band_blocked(lanes: list[dict], low: float, high: float) -> bool:
         crossing = ((4 - lane['phase']) / lane['speed']) % period
         left = crossing - margin / speed - lane['row'] * low
         right = crossing + margin / speed - (lane['row'] - 1) * high
-        for k in range(math.ceil(-right / period), math.floor((TRAFFIC_PERIOD-left)/period)+1):
-            intervals.append((max(0, left+k*period), min(TRAFFIC_PERIOD, right+k*period)))
+        for k in range(math.ceil(-right / period), math.floor((cycle-left)/period)+1):
+            intervals.append((max(0, left+k*period), min(cycle, right+k*period)))
     covered = 0.0
     for left, right in sorted(intervals):
         if left > covered:
             return False
         covered = max(covered, right)
-    return covered >= TRAFFIC_PERIOD
+    return covered >= cycle
 
 
-def blocks_blind_rushes(lanes: list[dict]) -> bool:
-    # Beyond 3.1 seconds between hops, a car necessarily reaches any occupied road row.
-    return all(_rush_band_blocked(lanes, 0.28+i*0.02, 0.30+i*0.02) for i in range(141))
+def blocks_blind_rushes(lanes: list[dict], *, minimum_hop: float = 0.28) -> bool:
+    car = next(lane for lane in lanes if lane['kind'] == 'car')
+    longest_gap = (9/car['count']-2*0.86)/abs(car['speed'])
+    bands = math.ceil((longest_gap-minimum_hop)/0.02)
+    return all(_rush_band_blocked(lanes, minimum_hop+i*0.02, minimum_hop+(i+1)*0.02)
+               for i in range(bands))
 
 
 def validate_init_data(raw: str, token: str, now: float) -> dict:
@@ -96,7 +100,10 @@ def _easy_game(user: dict, giveaway_id: int, now: float, *, hard_layout: bool = 
         for lane in game['lanes']:
             lane['phase'] = secrets.randbelow(900) / 100
         game['lanes'][0]['phase'] = 4 + (secrets.randbelow(31) - 15) / 100
-        if blocks_blind_rushes(game['lanes']) and has_timed_route(game):
+        slowed = game | {'lanes': [lane | {'speed': lane['speed']*.75}
+                                  for lane in game['lanes']]}
+        if (blocks_blind_rushes(game['lanes'], minimum_hop=.21) and has_timed_route(game)
+            and (hard_layout or has_timed_route(slowed))):
             break
     else:
         # Bounded generation, also when an RNG repeatedly produces the same easy layout.
@@ -108,7 +115,10 @@ def _easy_game(user: dict, giveaway_id: int, now: float, *, hard_layout: bool = 
 
 def new_game(user: dict, giveaway_id: int, now: float, *, difficulty: str = 'easy') -> dict:
     if difficulty == 'easy':
-        return _easy_game(user, giveaway_id, now)
+        game = _easy_game(user, giveaway_id, now)
+        for lane in game['lanes']:
+            lane['speed'] *= 0.75
+        return game
     if difficulty != 'hard':
         raise ValueError('invalid difficulty')
     for _ in range(8):
