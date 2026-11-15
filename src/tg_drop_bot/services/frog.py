@@ -11,6 +11,7 @@ from urllib.parse import parse_qsl
 
 # All traffic repeats after 20 seconds. Two cars per road lane leave readable gaps.
 TRAFFIC_PERIOD = 20.0
+HOP_COOLDOWN = 0.28
 FALLBACK_PHASES = {
     (1, 2): [4, 3.07, 1.82, 6.12],
     (1, 3): [4, 7.89, 4.96, 6.63, 6.24],
@@ -285,7 +286,7 @@ def advance(
     game["seq"] += 1
     if game["status"] != "playing" or direction == "wait":
         return game
-    if now - game["last_move"] < 0.28:
+    if now < game["last_move"] + HOP_COOLDOWN:
         return game
     finish = game.get("rows", 8) - 1
     game["y"] = min(finish, game["y"] + 1)

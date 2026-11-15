@@ -3,6 +3,13 @@ import {laserState} from './lasers.mjs';
 export const HOP_COOLDOWN_MS=280;
 export const HOP_ANIMATION_MS=140;
 
+const CIVILIAN_CARS=['#e69a35','#bd62d8','#42b684','#e26861'].map(body=>({body,stripe:null,marking:null,beacon:false}));
+const RKN_CARS=[{body:'#f3f6fa',stripe:'#2459a3'},{body:'#b5cae2',stripe:'#18385d'},{body:'#dce3eb',stripe:'#3475b8'}].map(car=>({...car,marking:'РКН',beacon:true}));
+export function vehicleStyle(difficulty,index){
+ const cars=difficulty==='hard'?RKN_CARS:CIVILIAN_CARS;
+ return cars[index%cars.length];
+}
+
 export function clockElapsed(clock,now){
  const passed=Math.max(0,(now-clock.local)/1000);
  const correction=Math.sign(clock.correction)*Math.min(Math.abs(clock.correction),passed*.1);
@@ -18,6 +25,21 @@ export function visualRow(animation,now,fallback){
  const progress=Math.max(0,Math.min(1,(now-animation.started)/animation.duration));
  const eased=1-(1-progress)**3;
  return animation.from+(animation.target-animation.from)*eased;
+}
+
+export function hopUnapplied(previous,next,direction){
+ return direction==='up'&&next.status==='playing'&&next.token===previous.token&&next.seq>previous.seq&&next.y===previous.y;
+}
+
+export function reconcileHop(animation,now,state){
+ if(!animation)return null;
+ if(state.y===animation.target)return {...animation,confirmed:true};
+ const position=visualRow(animation,now,state.y);
+ if(state.status!=='playing'){
+  // A collision ends this attempted hop in place. There is no backward move.
+  return {from:position,target:position,started:now,duration:1,confirmed:true,hold:true};
+ }
+ return {from:position,target:state.y,started:now,duration:90,confirmed:true};
 }
 
 // A hint to ask the server for a fresh result, never a local loss or win.

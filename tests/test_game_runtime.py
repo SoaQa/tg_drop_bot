@@ -202,6 +202,99 @@ def command_fixture(monkeypatch):
     return {"nonce": "original-nonce", "seq": 0, "checked": 0, "y": 0}, calls
 
 
+def timed_hop_fixture(monkeypatch):
+    clock, sleeps = [1000.3], []
+
+    async def sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr(game_runtime, "time", SimpleNamespace(time=lambda: clock[0]))
+    monkeypatch.setattr(game_runtime.asyncio, "sleep", sleep)
+    game = {
+        "nonce": "first",
+        "seq": 0,
+        "started": 1000,
+        "checked": 1000,
+        "last_move": 999,
+        "status": "playing",
+        "x": 3,
+        "y": 0,
+        "rows": 6,
+        "lanes": [],
+        "moves": [],
+    }
+    return game, clock, sleeps
+
+
+@pytest.mark.parametrize("record_moves", [True, False])
+async def test_network_jitter_queues_an_early_hop_instead_of_dropping_it(monkeypatch, record_moves):
+    game, clock, sleeps = timed_hop_fixture(monkeypatch)
+    first = {"nonce": game["nonce"], "seq": 0, "direction": "up"}
+    await game_runtime.execute_command(game, first, record_moves=record_moves)
+    assert game["y"] == 1 and not sleeps
+    # Sent 300 ms apart, but the first packet took 100 ms longer to arrive.
+    clock[0] += 0.2
+    second = {"nonce": game["nonce"], "seq": 1, "direction": "up"}
+    await game_runtime.execute_command(game, second, record_moves=record_moves)
+    assert game["y"] == 2 and game["seq"] == 2
+    assert len(sleeps) == 1 and 0.08 < sleeps[0] < 0.082
+    assert game["last_move"] - 1000.3 >= game_runtime.HOP_COOLDOWN
+    assert len(game["moves"]) == (2 if record_moves else 0)
+    original_time, nonce = game["checked"], game["nonce"]
+    await game_runtime.execute_command(game, second, record_moves=record_moves)
+    assert game["y"] == 2 and game["seq"] == 2 and game["nonce"] == nonce
+    assert len(sleeps) == 1 and game["checked"] == original_time
+
+
+@pytest.mark.parametrize("gap", [0, 0.279, 0.28, 0.3])
+async def test_hop_handles_immediate_and_exact_cooldown_boundary_arrivals(monkeypatch, gap):
+    game, clock, sleeps = timed_hop_fixture(monkeypatch)
+    await game_runtime.execute_command(game, {"nonce": "first", "seq": 0, "direction": "up"})
+    first_hop = game["last_move"]
+    clock[0] = first_hop + gap
+    await game_runtime.execute_command(
+        game,
+        {"nonce": game["nonce"], "seq": 1, "direction": "up"},
+    )
+    assert game["y"] == 2
+    assert game["last_move"] >= first_hop + game_runtime.HOP_COOLDOWN
+    assert bool(sleeps) == (gap < game_runtime.HOP_COOLDOWN)
+
+
+@pytest.mark.parametrize("mutation", [{"seq": True}, {"seq": 7}, {"nonce": "wrong"}])
+async def test_invalid_early_hop_cannot_wait_or_change_state(monkeypatch, mutation):
+    game, clock, sleeps = timed_hop_fixture(monkeypatch)
+    game["last_move"] = clock[0]
+    data = {"nonce": game["nonce"], "seq": game["seq"], "direction": "up"} | mutation
+    before = json.dumps(game, sort_keys=True)
+    with pytest.raises(ValueError):
+        await game_runtime.execute_command(game, data)
+    assert not sleeps and json.dumps(game, sort_keys=True) == before
+
+
+async def test_collision_during_cooldown_is_still_a_loss_not_an_extra_hop(monkeypatch):
+    game, clock, sleeps = timed_hop_fixture(monkeypatch)
+    clock[0] = 1001.01
+    game.update(y=1, checked=clock[0], last_move=1001.0)
+    game["lanes"] = [{"row": 1, "kind": "car", "phase": 2, "speed": 1, "count": 1}]
+    await game_runtime.execute_command(game, {"nonce": "first", "seq": 0, "direction": "up"})
+    assert sleeps and game["status"] == "lost" and game["y"] == 1
+    assert game["seq"] == 1 and not game["moves"]
+
+
+async def test_waiting_for_hop_cannot_extend_the_free_game_deadline(monkeypatch):
+    game, clock, sleeps = timed_hop_fixture(monkeypatch)
+    clock[0] = 1119.9
+    game.update(y=4, checked=clock[0], last_move=1119.8)
+    await game_runtime.execute_command(
+        game,
+        {"nonce": "first", "seq": 0, "direction": "up"},
+        deadline=1120,
+    )
+    assert sleeps and game["status"] == "expired" and game["y"] == 4
+
+
 def test_exact_last_command_retry_returns_current_state_without_advancing(monkeypatch):
     game, calls = command_fixture(monkeypatch)
     request = {"nonce": "original-nonce", "seq": 0, "direction": "up"}

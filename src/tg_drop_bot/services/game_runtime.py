@@ -12,7 +12,7 @@ import time
 from aiohttp import web
 from redis.asyncio import Redis
 
-from tg_drop_bot.services.frog import advance, new_game
+from tg_drop_bot.services.frog import HOP_COOLDOWN, advance, new_game
 
 MAX_GAME_BODY = 16_384
 
@@ -65,6 +65,41 @@ def command(game: dict, data: dict, now: float, *, record_moves: bool = True) ->
     game["last_command"] = fingerprint
     game["nonce"] = secrets.token_urlsafe(24)
     return game
+
+
+async def execute_command(
+    game: dict,
+    data: dict,
+    *,
+    record_moves: bool = True,
+    deadline: float | None = None,
+) -> dict:
+    """Keep a valid hop when network jitter compresses two arrival times.
+
+    The caller holds this owner's Redis lock. Only a fresh, correctly sequenced
+    up command can wait, for at most one cooldown. Retries and invalid commands
+    go straight through the normal validation; physics still uses real server time.
+    """
+    if (
+        game["status"] == "playing"
+        and data.get("direction") == "up"
+        and isinstance(data.get("nonce"), str)
+        and hmac.compare_digest(data["nonce"], game["nonce"])
+        and type(data.get("seq")) is int
+        and data["seq"] == game["seq"]
+    ):
+        async with asyncio.timeout(HOP_COOLDOWN + 0.05):
+            while (
+                0
+                < (delay := game["last_move"] + HOP_COOLDOWN - time.time())
+                <= HOP_COOLDOWN + 0.001
+            ):
+                # A small timer margin also avoids floating point boundary drops.
+                await asyncio.sleep(delay + 0.001)
+    now = time.time()
+    if deadline is not None and now >= deadline:
+        game["status"] = "expired"
+    return command(game, data, now, record_moves=record_moves)
 
 
 async def store_game(

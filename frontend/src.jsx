@@ -3,12 +3,11 @@ import {createRoot} from 'react-dom/client';
 import {drawWind} from './wind.mjs';
 import {drawBeacon} from './beacon.mjs';
 import {drawLaser} from './lasers.mjs';
-import {clockElapsed,syncClock,collisionHint,HOP_COOLDOWN_MS,HOP_ANIMATION_MS,visualRow} from './game_runtime.mjs';
+import {clockElapsed,syncClock,collisionHint,HOP_COOLDOWN_MS,HOP_ANIMATION_MS,visualRow,hopUnapplied,reconcileHop,vehicleStyle} from './game_runtime.mjs';
 
 const tg=window.Telegram?.WebApp;
 const freeMode=location.pathname.endsWith('/play/');
 const clientVersion=document.querySelector('meta[name="game-client-version"]')?.content||'';
-const CAR_PALETTES=[{body:'#f3f6fa',stripe:'#2459a3'},{body:'#b5cae2',stripe:'#18385d'},{body:'#dce3eb',stripe:'#3475b8'}];
 tg?.ready(); tg?.expand(); tg?.disableVerticalSwipes?.();
 function App(){
  const [game,setGame]=useState(null),[message,setMessage]=useState('Доберитесь до интернета.'),[busy,setBusy]=useState(false);
@@ -16,6 +15,7 @@ function App(){
  const previewDifficulty=useRef('easy');
  const current=useRef(null),pending=useRef(false),canvas=useRef(null),queuedTap=useRef(false);
  const animation=useRef(null),optimisticHop=useRef(false),inFlight=useRef(null),wakeDraw=useRef(()=>{});
+ const retryHop=useRef(false);
  const lastUpSent=useRef(-Infinity),lastTap=useRef(-Infinity),lastSent=useRef(0),lastHint=useRef(0);
  const mounted=useRef(true),activeAbort=useRef(null),lifetime=useRef(new AbortController());
  const cooldownTimer=useRef(null),needsSync=useRef(false),rtt=useRef(0);
@@ -56,9 +56,7 @@ function App(){
  }
  function reconcile(state){
   if(!animation.current)return;
-  const now=performance.now(),position=visualRow(animation.current,now,current.current?.y??state.y);
-  if(state.y===animation.current.target){animation.current.confirmed=true;}
-  else animation.current={from:position,target:state.y,started:now,duration:90,confirmed:true};
+  animation.current=reconcileHop(animation.current,performance.now(),state);
   optimisticHop.current=false;
  }
  function accept(state,latency,action){
@@ -79,7 +77,7 @@ function App(){
  }
  async function start(){
   if(pending.current)return;pending.current=true;inFlight.current='start';setBusy(true);
-  queuedTap.current=false;animation.current=null;optimisticHop.current=false;needsSync.current=false;lastUpSent.current=-Infinity;lastTap.current=-Infinity;
+  queuedTap.current=false;retryHop.current=false;animation.current=null;optimisticHop.current=false;needsSync.current=false;lastUpSent.current=-Infinity;lastTap.current=-Infinity;
   try{const result=await call('start',{giveaway:gid,...(freeMode?{difficulty}:{})});if(!mounted.current)return;accept(result.state,result.rtt,'start');showState(result.state);lastSent.current=performance.now();}
   catch(error){if(mounted.current)setMessage(error.message);}
   finally{pending.current=false;inFlight.current=null;if(mounted.current)setBusy(false);}
@@ -100,10 +98,11 @@ function App(){
  function pump(background=false){
   const state=current.current;if(!state||state.status!=='playing'||pending.current||document.hidden)return;
   if(needsSync.current){needsSync.current=false;sendMove('wait');return;}
-  if(queuedTap.current){
+  if(retryHop.current||queuedTap.current){
    const delay=HOP_COOLDOWN_MS-(performance.now()-lastUpSent.current);
    if(delay>0){if(cooldownTimer.current===null)cooldownTimer.current=setTimeout(()=>{cooldownTimer.current=null;pump();},delay+1);return;}
-   queuedTap.current=false;previewHop();lastUpSent.current=performance.now();sendMove('up');return;
+   if(retryHop.current)retryHop.current=false;else queuedTap.current=false;
+   previewHop();lastUpSent.current=performance.now();sendMove('up');return;
   }
   const interval=state.y===0?2000:1000;
   if(background&&performance.now()-lastSent.current>=interval)sendMove('wait');
@@ -113,11 +112,13 @@ function App(){
   pending.current=true;inFlight.current=direction;lastSent.current=performance.now();
   try{
    const result=await call('move',{token:state.token,nonce:state.nonce,seq:state.seq,direction});if(!mounted.current)return;
-   const next=result.state;accept(next,result.rtt,direction);
+   const next=result.state,unapplied=hopUnapplied(state,next,direction);
+   if(unapplied){retryHop.current=true;lastUpSent.current=performance.now();}
+   accept(next,result.rtt,unapplied?'wait':direction);
    showState(next);
-   if(next.status!=='playing')queuedTap.current=false;
+   if(next.status!=='playing'){queuedTap.current=false;retryHop.current=false;}
   }catch(error){
-   if(mounted.current){const failed={...current.current,status:'error'};accept(failed,0,direction);queuedTap.current=false;setMessage(error.message);}
+   if(mounted.current){const failed={...current.current,status:'error'};accept(failed,0,direction);queuedTap.current=false;retryHop.current=false;setMessage(error.message);}
   }finally{pending.current=false;inFlight.current=null;if(mounted.current&&!document.hidden)pump();}
  }
  useEffect(()=>{
@@ -128,7 +129,7 @@ function App(){
   document.addEventListener('pointerdown',tap);document.addEventListener('keydown',key);
   const resize=()=>{document.documentElement.style.setProperty('--app-height',`${Math.min(window.innerHeight,tg?.viewportStableHeight||window.innerHeight)}px`);wakeDraw.current();};
   const visibility=()=>{
-   if(document.hidden){queuedTap.current=false;needsSync.current=true;if(inFlight.current!=='up'){animation.current=null;optimisticHop.current=false;}}
+   if(document.hidden){queuedTap.current=false;needsSync.current=true;if(inFlight.current!=='up'&&!retryHop.current){animation.current=null;optimisticHop.current=false;}}
    else{wakeDraw.current();pump();}
   };
   resize();window.addEventListener('resize',resize);document.addEventListener('visibilitychange',visibility);tg?.onEvent?.('viewportChanged',resize);
@@ -164,14 +165,16 @@ function App(){
      ctx.fillStyle='#2c6650';ctx.fillRect(mx+14,py+7,23,22);ctx.strokeStyle='#263f36';ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(mx+9,py+9);ctx.lineTo(mx-8,py+3);ctx.lineTo(mx-8,py+33);ctx.lineTo(mx+9,py+27);ctx.stroke();ctx.lineWidth=1;
      continue;
     }
-    const scheme=CAR_PALETTES[i%3];
+    const scheme=vehicleStyle(g.difficulty,i);
     ctx.fillStyle=scheme.body;ctx.beginPath();ctx.roundRect(px,py,78,36,9);ctx.fill();
-    ctx.fillStyle=scheme.stripe;ctx.fillRect(px+8,py+3,62,4);ctx.fillRect(px+8,py+29,62,4);
+    if(scheme.stripe){ctx.fillStyle=scheme.stripe;ctx.fillRect(px+8,py+3,62,4);ctx.fillRect(px+8,py+29,62,4);}
     ctx.fillStyle='#344a60';ctx.fillRect(px+13,py+9,9,18);ctx.fillRect(px+57,py+9,9,18);
-    ctx.fillStyle='#f9fbff';ctx.fillRect(px+25,py+9,29,18);
-    drawBeacon(ctx,px+26,py-2,elapsed+i*.13+vehicle*.17,motionPreference.matches);
-    drawLaser(ctx,lane,vehicle,elapsed,px+39,py+18);
-    ctx.save();ctx.fillStyle=scheme.stripe;ctx.font='bold 10px system-ui';ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText('РКН',px+39,py+18);ctx.restore();
+    ctx.fillStyle=scheme.marking?'#f9fbff':scheme.body;ctx.fillRect(px+25,py+9,29,18);
+    if(scheme.beacon)drawBeacon(ctx,px+26,py-2,elapsed+i*.13+vehicle*.17,motionPreference.matches);
+    if(scheme.marking){
+     drawLaser(ctx,lane,vehicle,elapsed,px+39,py+18);
+     ctx.save();ctx.fillStyle=scheme.stripe;ctx.font='bold 10px system-ui';ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(scheme.marking,px+39,py+18);ctx.restore();
+    }
     }
    });
    const shownY=visualRow(animation.current,now,g?.y??0);
@@ -181,7 +184,7 @@ function App(){
    for(const dx of [-11,11]){ctx.beginPath();ctx.arc(fx+dx,fy-10,8,0,Math.PI*2);ctx.fill();ctx.fillStyle='#20382d';ctx.beginPath();ctx.arc(fx+dx,fy-12,3,0,Math.PI*2);ctx.fill();ctx.fillStyle='#bbe955';}
    if(g&&!motionPreference.matches)drawWind(ctx,elapsed,H,(g.started%997)/997,g.difficulty==='hard'?1:.4);
    const animating=animation.current&&now<animation.current.started+animation.current.duration;
-   if(animation.current?.confirmed&&!animating)animation.current=null;
+   if(animation.current?.confirmed&&!animation.current.hold&&!animating)animation.current=null;
    if(g?.status==='playing'||animating)frame=requestAnimationFrame(draw);
   };
   const wake=()=>{if(frame===null&&!document.hidden)frame=requestAnimationFrame(draw);};

@@ -201,6 +201,47 @@ async def test_abandoned_game_expires_and_active_game_cannot_extend_two_minutes(
         assert key not in store.data and current not in store.data
 
 
+async def test_two_fast_http_hops_both_execute_without_reducing_the_server_cooldown(monkeypatch):
+    store = TransientRedis()
+    monkeypatch.setattr(free_game_web.Redis, "from_url", lambda *a, **kw: store)
+    app = web.Application()
+    free_game_web.register_free_game_routes(app, Settings(BOT_TOKEN=TOKEN))
+    init = signed(at=int(time.time()))
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post(
+            "/play/api/start",
+            json={"initData": init, "clientVersion": __version__},
+        )
+        assert response.status == 200
+        state = await response.json()
+        key = "freefrog:session:" + state["token"]
+        game = json.loads(store.data[key])
+        # Isolate input/network timing from the random level's obstacles.
+        game.update(lanes=[], rows=6)
+        store.data[key] = json.dumps(game)
+        times = []
+        for row in (1, 2):
+            request = {
+                "initData": init,
+                "token": state["token"],
+                "nonce": state["nonce"],
+                "seq": state["seq"],
+                "direction": "up",
+            }
+            response = await client.post("/play/api/move", json=request)
+            assert response.status == 200
+            state = await response.json()
+            assert state["y"] == row and state["status"] == "playing"
+            times.append(json.loads(store.data[key])["last_move"])
+        assert times[1] - times[0] >= 0.28
+        # Lost response retry: a third HTTP request is still only the second hop.
+        response = await client.post("/play/api/move", json=request)
+        assert response.status == 200
+        repeated = await response.json()
+        assert repeated["y"] == 2 and repeated["seq"] == state["seq"]
+        assert repeated["nonce"] == state["nonce"]
+
+
 async def test_game_buttons_in_private_and_group():
     settings = Settings(WEBHOOK_URL="https://example.com")
     bot = AsyncMock()

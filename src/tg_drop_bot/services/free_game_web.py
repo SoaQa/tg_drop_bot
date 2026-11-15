@@ -17,7 +17,7 @@ from tg_drop_bot.config import Settings
 from tg_drop_bot.services.frog import public_game, validate_init_data
 from tg_drop_bot.services.game_page import render_game_page, require_current_game_client
 from tg_drop_bot.services.game_runtime import (
-    command,
+    execute_command,
     game_generator,
     quota,
     read_game_request,
@@ -123,7 +123,9 @@ def register_free_game_routes(app: web.Application, settings: Settings) -> None:
                 raise ValueError("wrong owner")
             if now >= game["started"] + 120:
                 game["status"] = "expired"
-            game = command(game, data, now, record_moves=False)
+            game = await execute_command(
+                game, data, record_moves=False, deadline=game["started"] + 120
+            )
         else:
             raise web.HTTPNotFound()
         remaining_ms = int((game["started"] + 120 - time.time()) * 1000)

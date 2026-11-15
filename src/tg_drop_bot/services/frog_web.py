@@ -30,7 +30,7 @@ from tg_drop_bot.services.dates import utc_now
 from tg_drop_bot.services.frog import advance, public_game, validate_init_data
 from tg_drop_bot.services.game_page import render_game_page, require_current_game_client
 from tg_drop_bot.services.game_runtime import (
-    command,
+    execute_command,
     game_generator,
     quota,
     read_game_request,
@@ -461,7 +461,7 @@ def register_game_routes(
             game = json.loads(raw)
             if game["user"]["id"] != uid:
                 raise ValueError("wrong owner")
-            game = command(game, data, time.time())
+            game = await execute_command(game, data)
         else:
             raise web.HTTPNotFound()
         await persist(game, token)
