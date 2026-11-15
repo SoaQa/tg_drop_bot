@@ -1,0 +1,1 @@
+{"name":"frog-verification","private":true,"type":"module","scripts":{"build":"esbuild src.jsx --bundle --minify --outfile=../src/tg_drop_bot/static/frog/assets/app.js"},"dependencies":{"react":"^19.2.0","react-dom":"^19.2.0"},"devDependencies":{"esbuild":"^0.25.0"}}

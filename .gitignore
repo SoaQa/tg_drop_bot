@@ -218,3 +218,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+# Frontend dependencies and generated bundle
+frontend/node_modules/
+src/tg_drop_bot/static/frog/assets/app.js

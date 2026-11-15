@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     app_env: str = Field(default="local", alias="APP_ENV")
     app_timezone: str = Field(default="Europe/Moscow", alias="APP_TIMEZONE")
     app_secret_key: str = Field(default="dev-change-me", alias="APP_SECRET_KEY")
+    frog_game_enabled: bool = Field(default=False, alias="FROG_GAME_ENABLED")
 
     telegram_mode: Literal["polling", "webhook"] = Field(default="polling", alias="TELEGRAM_MODE")
     webhook_url: str = Field(default="", alias="WEBHOOK_URL")
@@ -66,6 +67,11 @@ class Settings(BaseSettings):
         return f"{self.webhook_url.rstrip('/')}{self.webhook_path}"
 
     def validate_runtime(self) -> None:
+        if self.frog_game_enabled and (
+            self.telegram_mode != "webhook" or self.participation_queue_enabled
+            or not self.redis_url
+        ):
+            raise RuntimeError("Frog test mode requires webhook, Redis and disabled queue")
         if not self.bot_token:
             raise RuntimeError("BOT_TOKEN is required")
         if not self.admin_id_set:

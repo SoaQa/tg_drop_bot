@@ -66,6 +66,10 @@ async def run_bot() -> None:
         return
 
     app = web.Application()
+    if settings.frog_game_enabled:
+        from tg_drop_bot.services.frog_web import register_game_routes
+
+        register_game_routes(app, settings, session_factory, bot)
     limits = ParticipationLimits(settings) if settings.participation_queue_enabled else None
     handler: SimpleRequestHandler
     if limits is not None:

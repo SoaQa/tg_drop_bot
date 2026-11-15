@@ -153,6 +153,17 @@ async def start_captcha_flow(
         await message.answer("Ваше участие уже засчитано.")
         return
 
+    if settings.frog_game_enabled:
+        from tg_drop_bot.services.frog_web import game_keyboard
+
+        await state.clear()
+        await message.answer(
+            "Для участия помогите лягушке перейти дорогу. "
+            "Откройте игру и доберитесь до верхнего берега.",
+            reply_markup=game_keyboard(settings, giveaway.id),
+        )
+        return
+
     blocking_challenge = await get_blocking_captcha_challenge(
         session, giveaway_id, participant_user.id
     )
