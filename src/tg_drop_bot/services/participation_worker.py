@@ -90,6 +90,27 @@ async def issue_captcha(
         close_flow(flow)
         return "Ваше участие уже засчитано."
 
+    if settings.frog_game_enabled:
+        from tg_drop_bot.services.frog_web import game_keyboard
+
+        try:
+            await bot.send_message(
+                flow.user_id,
+                "Чтобы подтвердить участие, доведите лягушку до финиша. "
+                "Нажимайте на экран, чтобы прыгать вперёд.",
+                reply_markup=game_keyboard(settings, giveaway.id),
+            )
+        except (TelegramForbiddenError, TelegramBadRequest):
+            close_flow(flow)
+            return None
+        delivered_at = utc_now()
+        flow.status = "game"
+        flow.challenge_id = job.id
+        flow.answer_hash = None
+        flow.captcha_sent_at = delivered_at
+        flow.expires_at = delivered_at + timedelta(seconds=settings.captcha_ttl_seconds)
+        return None
+
     code = queued_captcha_code(settings, job.id)
     picture = await asyncio.to_thread(render_captcha_png, code)
     try:

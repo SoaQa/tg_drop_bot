@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     app_timezone: str = Field(default="Europe/Moscow", alias="APP_TIMEZONE")
     app_secret_key: str = Field(default="dev-change-me", alias="APP_SECRET_KEY")
     frog_game_enabled: bool = Field(default=False, alias="FROG_GAME_ENABLED")
+    frog_game_path: Literal["/game", "/test/game"] = Field(
+        default="/game", alias="FROG_GAME_PATH",
+    )
     free_game_enabled: bool = Field(default=False, alias="FREE_GAME_ENABLED")
     free_game_path: Literal["/play", "/test/play"] = Field(
         default="/play", alias="FREE_GAME_PATH",
@@ -77,10 +80,9 @@ class Settings(BaseSettings):
         ):
             raise RuntimeError("Free game requires webhook, Redis and a private secret")
         if self.frog_game_enabled and (
-            self.telegram_mode != "webhook" or self.participation_queue_enabled
-            or not self.redis_url
+            self.telegram_mode != "webhook" or not self.redis_url
         ):
-            raise RuntimeError("Frog test mode requires webhook, Redis and disabled queue")
+            raise RuntimeError("Frog game requires webhook and Redis")
         if not self.bot_token:
             raise RuntimeError("BOT_TOKEN is required")
         if not self.admin_id_set:

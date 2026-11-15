@@ -61,7 +61,7 @@ async def admit_start(
     )
     if flow is not None:
         if flow.status == "waiting" or (
-            flow.status == "captcha" and flow.expires_at and flow.expires_at > received_at
+            flow.status in ("captcha", "game") and flow.expires_at and flow.expires_at > received_at
         ):
             return "duplicate"
         if flow.cooldown_until and flow.cooldown_until > received_at:
@@ -257,7 +257,7 @@ async def giveaway_has_pending_intake(
                     ParticipationFlow.giveaway_id == giveaway_id,
                     or_(
                         pending,
-                        (ParticipationFlow.status == "captcha")
+                        ParticipationFlow.status.in_(["captcha", "game"])
                         & (ParticipationFlow.expires_at > now),
                     ),
                 )
@@ -303,7 +303,7 @@ async def cleanup_participation_queue(session: AsyncSession) -> None:
     await session.execute(
         update(ParticipationFlow)
         .where(
-            ParticipationFlow.status == "captcha",
+            ParticipationFlow.status.in_(["captcha", "game"]),
             ParticipationFlow.expires_at < now - timedelta(minutes=1),
             ~select(ParticipationJob.id)
             .where(

@@ -10,7 +10,7 @@ function App(){
  const current=useRef(null),pending=useRef(false),canvas=useRef(null),sync=useRef(0),queuedTap=useRef(false);
  const gid=new URLSearchParams(location.search).get('giveaway');
  async function call(action,extra){
-  const r=await fetch((freeMode?location.pathname+'api/':'/test/api/game/')+action,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({initData:tg?.initData||'',...extra})});
+  const r=await fetch(location.pathname+'api/'+action,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({initData:tg?.initData||'',...extra})});
   if(!r.ok) throw new Error(await r.text());
   return r.json();
  }

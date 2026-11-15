@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
+from aiogram.types import User
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 from sqlalchemy import func, select, text
@@ -13,7 +14,15 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from test_frog import TOKEN, signed
 
 from tg_drop_bot.config import Settings
-from tg_drop_bot.db.models import AuditLog, Base, Giveaway, KnownChannel, Participant
+from tg_drop_bot.db.models import (
+    AuditLog,
+    Base,
+    Giveaway,
+    KnownChannel,
+    Participant,
+    ParticipationFlow,
+    ParticipationJob,
+)
 from tg_drop_bot.services import frog_web
 from tg_drop_bot.services.conditions import ConditionCheck
 from tg_drop_bot.services.dates import utc_now
@@ -46,10 +55,17 @@ class MemoryRedis:
         yield
 
 
-async def test_api_rejects_fake_success_wrong_owner_replays_and_records_real_finish(monkeypatch):
+@pytest.mark.parametrize("queued, failure", [
+    (False, None), (True, None), (True, "expired"),
+    (True, "replaced"), (True, "finished"), (True, "conditions"),
+])
+async def test_api_rejects_fake_success_wrong_owner_replays_and_records_real_finish(
+    monkeypatch, queued, failure,
+):
     import json
 
-    from tg_drop_bot.services import giveaways
+    from tg_drop_bot.services import giveaways, participation_worker
+    from tg_drop_bot.services.participation_queue import admit_start, giveaway_has_pending_intake
 
     engine = create_async_engine(os.environ["TEST_DATABASE_URL"])
     schema = "frog_test_" + uuid4().hex
@@ -70,7 +86,10 @@ async def test_api_rejects_fake_success_wrong_owner_replays_and_records_real_fin
     monkeypatch.setattr(frog_web.time, "time", lambda: clock[0])
     bot = AsyncMock()
     app = web.Application()
-    frog_web.register_game_routes(app, Settings(BOT_TOKEN=TOKEN), sessions, bot)
+    settings = Settings(
+        BOT_TOKEN=TOKEN, PARTICIPATION_QUEUE_ENABLED=queued, WEBHOOK_URL="https://example.test",
+    )
+    frog_web.register_game_routes(app, settings, sessions, bot)
     try:
         async with sessions.begin() as s:
             ch = KnownChannel(telegram_chat_id=-555, title="Тест")
@@ -84,7 +103,7 @@ async def test_api_rejects_fake_success_wrong_owner_replays_and_records_real_fin
             await s.flush()
             gid = g.id
         async with TestClient(TestServer(app)) as client:
-            page = await client.get('/test/game/')
+            page = await client.get('/game/')
             assert page.status == 200
             html = await page.text()
             assert 'anti-bot-verification' in html
@@ -93,12 +112,50 @@ async def test_api_rejects_fake_success_wrong_owner_replays_and_records_real_fin
             init = signed(at=int(clock[0]))
             nonce = None
             async def post(action, **kw):
-                return await client.post('/test/api/game/'+action, json={
+                return await client.post('/game/api/'+action, json={
                     "initData": init, "nonce": nonce, **kw,
                 })
 
-            r = await client.post('/test/api/game/start', json={"passed": True, "giveaway": gid})
+            r = await client.post('/game/api/start', json={"passed": True, "giveaway": gid})
             assert r.status == 400
+            if queued:
+                assert (await post('start', giveaway=gid)).status == 409
+                monkeypatch.setattr(participation_worker, "check_participant_conditions", AsyncMock(
+                    return_value=ConditionCheck(ok=True, membership_status="member"),
+                ))
+                async with sessions.begin() as s:
+                    assert await admit_start(
+                        s, giveaway_id=gid,
+                        user=User(id=123, is_bot=False, first_name="Тест"),
+                        update_id=1, received_at=utc_now(), allow_new=AsyncMock(return_value=True),
+                    ) == "accepted"
+                    jobid = await s.scalar(select(ParticipationJob.id))
+                    assert jobid is not None
+                await participation_worker.process_participation_job(sessions, bot, settings, jobid)
+                await participation_worker.process_participation_job(sessions, bot, settings, jobid)
+                bot.send_photo.assert_not_awaited()
+                bot.send_message.assert_awaited_once()
+                keyboard = bot.send_message.call_args.kwargs['reply_markup']
+                assert f'/game/?giveaway={gid}' in keyboard.inline_keyboard[0][0].web_app.url
+                bot.reset_mock()
+                async with sessions.begin() as s:
+                    flow = await s.scalar(select(ParticipationFlow))
+                    assert flow is not None
+                    assert flow.status == "game" and flow.answer_hash is None
+                    assert await giveaway_has_pending_intake(s, gid, now=utc_now())
+                    assert await admit_start(
+                        s, giveaway_id=gid,
+                        user=User(id=123, is_bot=False, first_name="Тест"),
+                        update_id=2, received_at=utc_now(), allow_new=AsyncMock(return_value=True),
+                    ) == "duplicate"
+                    # Already accepted games may finish while the draw drains.
+                    giveaway = await s.get(Giveaway, gid)
+                    assert giveaway is not None
+                    giveaway.intake_closed_at = utc_now()
+                    giveaway.deadline_at = utc_now()-timedelta(seconds=1)
+                assert (await client.post('/game/api/start', json={
+                    "initData": signed(456, int(clock[0])), "giveaway": gid,
+                })).status == 409
             r = await post('start', giveaway=gid)
             assert r.status == 200
             state = await r.json()
@@ -110,7 +167,7 @@ async def test_api_rejects_fake_success_wrong_owner_replays_and_records_real_fin
             assert (await post('move', token=token, seq=0, direction='won')).status == 400
             for direction in ('left', 'right', 'down'):
                 assert (await post('move', token=token, seq=0, direction=direction)).status == 400
-            assert (await client.post('/test/api/game/move', json={
+            assert (await client.post('/game/api/move', json={
                 "initData": signed(456, int(clock[0])), "token": token, "seq": 0, "direction": 'up',
             })).status == 400
             async with sessions() as s:
@@ -122,8 +179,31 @@ async def test_api_rejects_fake_success_wrong_owner_replays_and_records_real_fin
             memory.data['frog:session:'+token] = json.dumps(game)
             jumps = state['rows'] - 1
             for seq in range(jumps):
+                if failure and seq == jumps - 1:
+                    async with sessions.begin() as s:
+                        flow = await s.scalar(select(ParticipationFlow))
+                        assert flow is not None
+                        if failure == "expired":
+                            flow.expires_at = utc_now()-timedelta(seconds=1)
+                        elif failure == "replaced":
+                            flow.challenge_id += 100
+                        elif failure == "finished":
+                            giveaway = await s.get(Giveaway, gid)
+                            assert giveaway is not None
+                            giveaway.status = "finished"
+                    if failure == "conditions":
+                        monkeypatch.setattr(giveaways, "check_participant_conditions", AsyncMock(
+                            return_value=ConditionCheck(
+                                ok=False, membership_status="left", user_message="Нет подписки",
+                            ),
+                        ))
                 clock[0] += 0.3
                 r = await post('move', token=token, seq=seq, direction='up')
+                if failure and seq == jumps - 1:
+                    assert r.status == (403 if failure == "conditions" else 409)
+                    async with sessions() as s:
+                        assert await s.scalar(select(func.count()).select_from(Participant)) == 0
+                    return
                 assert r.status == 200, (seq, await r.text())
                 state = await r.json()
                 old_nonce, nonce = nonce, state['nonce']
@@ -144,8 +224,19 @@ async def test_api_rejects_fake_success_wrong_owner_replays_and_records_real_fin
                 assert record.payload['move_count'] == jumps
                 assert record.payload['status'] == 'won'
             bot.send_message.assert_awaited_once()
-            await post('start', giveaway=gid)
-            assert (await post('move', token=token, seq=7, direction='wait')).status == 400
+            if queued:
+                async with sessions() as s:
+                    assert not await giveaway_has_pending_intake(s, gid, now=utc_now())
+                    flow = await s.scalar(select(ParticipationFlow))
+                    assert flow is not None
+                    assert flow.status == "done"
+                    participant = await s.scalar(select(Participant))
+                    assert participant is not None
+                    assert participant.captcha_response_ms is not None
+                assert (await post('start', giveaway=gid)).status == 409
+            else:
+                await post('start', giveaway=gid)
+                assert (await post('move', token=token, seq=7, direction='wait')).status == 400
     finally:
         await scoped.dispose()
         async with engine.begin() as c:

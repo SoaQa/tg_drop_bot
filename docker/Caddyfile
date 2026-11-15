@@ -9,5 +9,13 @@
 		reverse_proxy bot:8080
 	}
 
+	handle /game/* {
+		reverse_proxy bot:8080
+	}
+
+	handle /play/* {
+		reverse_proxy bot:8080
+	}
+
 	respond 404
 }

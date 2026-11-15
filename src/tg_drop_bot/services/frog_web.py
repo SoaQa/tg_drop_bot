@@ -12,11 +12,12 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, User, WebAppInfo
 from aiohttp import web
 from redis.asyncio import Redis
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tg_drop_bot.config import Settings
-from tg_drop_bot.db.models import AuditLog
+from tg_drop_bot.db.models import AuditLog, Participant, ParticipationFlow
+from tg_drop_bot.services.captcha import captcha_response_ms
 from tg_drop_bot.services.dates import utc_now
 from tg_drop_bot.services.frog import advance, new_game, public_game, validate_init_data
 from tg_drop_bot.services.game_page import render_game_page
@@ -25,10 +26,11 @@ from tg_drop_bot.services.giveaways import (
     is_giveaway_open,
     register_participant_after_condition_check,
 )
+from tg_drop_bot.services.participation_queue import lock_giveaway_intake
 
 
 def game_keyboard(settings: Settings, giveaway_id: int) -> InlineKeyboardMarkup:
-    url = f"{settings.webhook_url}/test/game/?giveaway={giveaway_id}"
+    url = f"{settings.webhook_url}{settings.frog_game_path}/?giveaway={giveaway_id}"
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="Играть и участвовать", web_app=WebAppInfo(url=url)),
     ]])
@@ -40,7 +42,23 @@ def register_game_routes(
 ) -> None:
     redis = Redis.from_url(settings.redis_url, decode_responses=True)
     assets = Path(__file__).parent.parent / "static" / "frog"
-    html = render_game_page((assets / "index.html").read_text(encoding="utf-8"), captcha=True)
+    prefix = settings.frog_game_path
+    html = render_game_page(
+        (assets / "index.html").read_text(encoding="utf-8"), captcha=True,
+    ).replace("/test/game/assets/", f"{prefix}/assets/")
+
+    async def queued_flow(session: AsyncSession, gid: int, uid: int) -> ParticipationFlow:
+        # Same intake lock as closing the draw: an admitted game keeps it draining.
+        giveaway = await lock_giveaway_intake(session, gid)
+        flow = await session.scalar(select(ParticipationFlow).where(
+            ParticipationFlow.giveaway_id == gid, ParticipationFlow.user_id == uid,
+        ).with_for_update())
+        if (
+            giveaway is None or giveaway.status != "published" or flow is None
+            or flow.status != "game" or flow.expires_at is None or flow.expires_at <= utc_now()
+        ):
+            raise web.HTTPConflict(text="Проверка истекла. Нажмите кнопку участия в боте.")
+        return flow
 
     async def page(request: web.Request) -> web.Response:
         return web.Response(
@@ -66,6 +84,7 @@ def register_game_routes(
     async def locked(request: web.Request, data: dict, user: dict) -> web.Response:
         now = time.time()
         uid = user["id"]
+        flow: ParticipationFlow | None = None
         if request.match_info["action"] == "start":
             countkey = f"frog:start:{uid}:{int(now) // 60}"
             if await redis.incr(countkey) == 1:
@@ -73,11 +92,17 @@ def register_game_routes(
             if int(await redis.get(countkey) or 0) > 10:
                 raise web.HTTPTooManyRequests(text="Отдохните минуту и попробуйте снова.")
             gid = int(data["giveaway"])
+            challenge_id = None
             async with sessions() as session:
-                giveaway = await get_giveaway(session, gid)
-                if not giveaway or not is_giveaway_open(giveaway):
-                    raise web.HTTPConflict(text="Приём заявок закрыт.")
+                if settings.participation_queue_enabled:
+                    flow = await queued_flow(session, gid, uid)
+                    challenge_id = flow.challenge_id
+                else:
+                    giveaway = await get_giveaway(session, gid)
+                    if not giveaway or not is_giveaway_open(giveaway):
+                        raise web.HTTPConflict(text="Приём заявок закрыт.")
             game = new_game(user, gid, now)
+            game["challenge_id"] = challenge_id
             game['nonce'] = secrets.token_urlsafe(24)
             async with sessions() as session:
                 record = AuditLog(
@@ -122,8 +147,23 @@ def register_game_routes(
             await redis.set(f"frog:session:{token}", json.dumps(game), ex=360)
         if game["status"] == "won":
             async with sessions() as session:
+                # A committed registration can be retried after a lost HTTP response.
+                existing = await session.scalar(select(Participant.id).where(
+                    Participant.giveaway_id == game["giveaway_id"], Participant.user_id == uid,
+                ))
+                if existing:
+                    return web.json_response(public_game(game, time.time()) | {
+                        "token": token, "nonce": game['nonce'],
+                    }, headers={"Cache-Control": "no-store"})
+                flow = None
+                if settings.participation_queue_enabled:
+                    flow = await queued_flow(session, game["giveaway_id"], uid)
+                    if flow.challenge_id != game["challenge_id"]:
+                        raise web.HTTPConflict(
+                            text="Проверка заменена. Откройте новую игру из бота.",
+                        )
                 giveaway = await get_giveaway(session, game["giveaway_id"])
-                if not giveaway or not is_giveaway_open(giveaway):
+                if not giveaway or (flow is None and not is_giveaway_open(giveaway)):
                     raise web.HTTPConflict(text="Приём заявок закрыт.")
                 result = await register_participant_after_condition_check(
                     session, bot, giveaway, User.model_validate(game["user"] | {"is_bot": False}),
@@ -134,11 +174,18 @@ def register_game_routes(
                         text=result.condition_check.user_message or "Условия участия не выполнены.",
                     )
                 if result.created:
+                    result.participant.captcha_response_ms = captcha_response_ms(
+                        flow.captcha_sent_at if flow else None, utc_now(),
+                    )
                     session.add(AuditLog(
                         giveaway_id=giveaway.id, actor_user_id=uid,
                         action="participant.frog_passed",
                         payload={"seconds": round(now-game["started"], 2)},
                     ))
+                if flow is not None:
+                    from tg_drop_bot.services.participation_worker import close_flow
+
+                    close_flow(flow)
                 await session.commit()
                 if result.created:
                     with contextlib.suppress(TelegramAPIError):
@@ -153,6 +200,6 @@ def register_game_routes(
         await redis.aclose()
 
     app.on_cleanup.append(cleanup)
-    app.router.add_get("/test/game/", page)
-    app.router.add_post("/test/api/game/{action}", api)
-    app.router.add_static("/test/game/assets/", assets / "assets")
+    app.router.add_get(f"{prefix}/", page)
+    app.router.add_post(f"{prefix}/api/{{action}}", api)
+    app.router.add_static(f"{prefix}/assets/", assets / "assets")
