@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import hmac
 import json
 import secrets
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 from aiogram import Bot
@@ -26,6 +28,7 @@ from tg_drop_bot.services.giveaways import (
     is_giveaway_open,
     register_participant_after_condition_check,
 )
+from tg_drop_bot.services.hard_game import claim_hard_attempt, record_hard_completion
 from tg_drop_bot.services.participation_queue import lock_giveaway_intake
 
 
@@ -99,16 +102,40 @@ def register_game_routes(
                     flow = await queued_flow(session, gid, uid)
                     challenge_id = flow.challenge_id
                 else:
+                    await lock_giveaway_intake(session, gid)
                     giveaway = await get_giveaway(session, gid)
                     if not giveaway or not is_giveaway_open(giveaway):
                         raise web.HTTPConflict(text="Приём заявок закрыт.")
-            game = new_game(user, gid, now)
-            game["challenge_id"] = challenge_id
-            game['nonce'] = secrets.token_urlsafe(24)
-            async with sessions() as session:
+                if await session.scalar(select(Participant.id).where(
+                    Participant.giveaway_id == gid, Participant.user_id == uid,
+                )):
+                    raise web.HTTPConflict(text="Ваше участие уже засчитано.")
+                # Refreshing an unfinished hard attempt resumes it rather than granting a retry.
+                current = await redis.get(f'frog:current:{uid}')
+                raw = await redis.get(f'frog:session:{current}') if current else None
+                previous = json.loads(raw) if raw else None
+                if (previous and previous['giveaway_id'] == gid
+                    and previous.get('user', {}).get('id') == uid
+                    and previous.get('difficulty') == 'hard'
+                    and previous.get('challenge_id') == challenge_id
+                    and previous['status'] == 'playing'):
+                    previous = advance(previous, 'wait', previous['seq'], now)
+                    if previous['status'] == 'playing':
+                        await redis.set(f'frog:session:{current}', json.dumps(previous), ex=360)
+                        return web.json_response(public_game(previous, now) | {
+                            'token': current, 'nonce': previous['nonce'],
+                        }, headers={'Cache-Control': 'no-store'})
+                hard_key = secrets.token_urlsafe(24)
+                hard = await claim_hard_attempt(session, gid, uid, hard_key)
+                game = await asyncio.to_thread(
+                    new_game, user, gid, now, difficulty='hard' if hard else 'easy',
+                )
+                game['hard_key'] = hard_key if hard else None
+                game["challenge_id"] = challenge_id
+                game['nonce'] = secrets.token_urlsafe(24)
                 record = AuditLog(
                     giveaway_id=gid, actor_user_id=uid, action="frog.run.started",
-                    payload={"started": now, "status": "started"},
+                    payload={"started": now, "status": "started", "difficulty": game['difficulty']},
                 )
                 session.add(record)
                 await session.flush()
@@ -142,6 +169,7 @@ def register_game_routes(
                     "started": game["started"], "finished": now, "status": game["status"],
                     "seconds": round(now-game["started"], 3), "moves": game["moves"],
                     "move_count": len(game["moves"]), "lanes": game["lanes"],
+                    "difficulty": game.get('difficulty', 'easy'),
                 }))
                 await session.commit()
             game["logged"] = True
@@ -187,6 +215,12 @@ def register_game_routes(
                     from tg_drop_bot.services.participation_worker import close_flow
 
                     close_flow(flow)
+                if game.get('difficulty') == 'hard' and game.get('hard_key'):
+                    await record_hard_completion(
+                        session, giveaway.id, uid, game['hard_key'],
+                        round((game['checked']-game['started'])*1000),
+                        datetime.fromtimestamp(game['checked'], UTC),
+                    )
                 await session.commit()
                 if result.created:
                     with contextlib.suppress(TelegramAPIError):

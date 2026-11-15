@@ -8,6 +8,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.storage.redis import RedisStorage
+from aiogram.types import BotCommand
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 
@@ -43,6 +44,10 @@ async def run_bot() -> None:
     dispatcher.callback_query.middleware(RateLimitMiddleware())
     dispatcher.update.middleware(DbSessionMiddleware())
     dispatcher.include_router(channel.router)
+    if settings.frog_game_enabled:
+        from tg_drop_bot.bot.free_game import top_router
+
+        dispatcher.include_router(top_router)
     if settings.free_game_enabled:
         from tg_drop_bot.bot.free_game import router as free_game_router
 
@@ -102,6 +107,15 @@ async def run_bot() -> None:
             secret_token=settings.webhook_secret,
             allowed_updates=dispatcher.resolve_used_update_types(),
         )
+        commands = await bot.get_my_commands()
+        names = {command.command for command in commands}
+        additions = []
+        if settings.free_game_enabled and 'game' not in names:
+            additions.append(BotCommand(command='game', description='Поиграть в лягушку'))
+        if settings.frog_game_enabled and 'top' not in names:
+            additions.append(BotCommand(command='top', description='Топ сложных прохождений'))
+        if additions:
+            await bot.set_my_commands(commands+additions)
         scheduler.start()
         if limits is not None:
             queue_tasks.append(asyncio.create_task(

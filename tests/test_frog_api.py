@@ -19,6 +19,7 @@ from tg_drop_bot.db.models import (
     AuditLog,
     Base,
     Giveaway,
+    HardGameAttempt,
     KnownChannel,
     Participant,
     ParticipationFlow,
@@ -59,6 +60,7 @@ class MemoryRedis:
 @pytest.mark.parametrize("queued, failure", [
     (False, None), (True, None), (True, "expired"),
     (True, "replaced"), (True, "finished"), (True, "conditions"),
+    (False, "retry"), (True, "retry"), (True, "abandoned"),
 ])
 async def test_api_rejects_fake_success_wrong_owner_replays_and_records_real_finish(
     monkeypatch, queued, failure,
@@ -168,6 +170,28 @@ async def test_api_rejects_fake_success_wrong_owner_replays_and_records_real_fin
             r = await post('start', giveaway=gid)
             assert r.status == 200
             state = await r.json()
+            assert state['difficulty'] == 'hard'
+            completed_hard = failure not in ('retry', 'abandoned')
+            if not completed_hard:
+                original = state['token']
+                resumed = await post('start', giveaway=gid, difficulty='easy')
+                state = await resumed.json()
+                assert state['token'] == original and state['difficulty'] == 'hard'
+                if failure == 'retry':
+                    nonce = state['nonce']
+                    lost = await post('move', token=original, seq=state['seq'], direction='up')
+                    assert (await lost.json())['status'] == 'lost'
+                else:
+                    # Browser closed and transient Redis state expired; durable claim survives.
+                    memory.data.pop('frog:session:'+original)
+                    memory.data.pop('frog:current:123')
+                response = await post('start', giveaway=gid, difficulty='hard')
+                assert response.status == 200
+                state = await response.json()
+                assert state['difficulty'] == 'easy'
+                assert all('laser' not in lane for lane in state['lanes'])
+                assert (await post('move', token=original, seq=0, direction='up')).status == 400
+                failure = None
             token = state['token']
             nonce = state['nonce']
             assert (await post('move', token=token, nonce='forged', seq=0,
@@ -185,6 +209,7 @@ async def test_api_rejects_fake_success_wrong_owner_replays_and_records_real_fin
             game = json.loads(memory.data['frog:session:'+token])
             for lane in game['lanes']:
                 lane.update(phase=0, speed=0.45, count=1)
+                lane.pop("laser", None)
             memory.data['frog:session:'+token] = json.dumps(game)
             jumps = state['rows'] - 1
             for seq in range(jumps):
@@ -229,7 +254,14 @@ async def test_api_rejects_fake_success_wrong_owner_replays_and_records_real_fin
                 assert await s.scalar(select(func.count()).select_from(Participant)) == 1
                 record = await s.scalar(select(AuditLog).where(
                     AuditLog.action == 'frog.run.finished',
-                ))
+                ).order_by(AuditLog.id.desc()))
+                hard_attempt = await s.get(HardGameAttempt, (gid, 123))
+                assert hard_attempt is not None
+                if completed_hard:
+                    assert hard_attempt.completed_at is not None
+                    assert hard_attempt.duration_ms == jumps*300
+                else:
+                    assert hard_attempt.completed_at is None and hard_attempt.duration_ms is None
                 assert record is not None
                 assert record.payload['move_count'] == jumps
                 assert record.payload['status'] == 'won'
@@ -245,8 +277,7 @@ async def test_api_rejects_fake_success_wrong_owner_replays_and_records_real_fin
                     assert participant.captcha_response_ms is not None
                 assert (await post('start', giveaway=gid)).status == 409
             else:
-                await post('start', giveaway=gid)
-                assert (await post('move', token=token, seq=7, direction='wait')).status == 400
+                assert (await post('start', giveaway=gid)).status == 409
     finally:
         await scoped.dispose()
         async with engine.begin() as c:

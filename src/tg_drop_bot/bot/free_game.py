@@ -1,10 +1,21 @@
 from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, WebAppInfo
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from tg_drop_bot.config import Settings
 
 router = Router(name="free_game")
+top_router = Router(name="hard_top")
+
+
+@top_router.message(Command("top", "Top"))
+async def show_top(message: Message, session: AsyncSession) -> None:
+    from tg_drop_bot.services.hard_game import leaderboard_text
+
+    await message.answer(await leaderboard_text(
+        session, message.chat.id if message.chat.type != 'private' else None,
+    ))
 
 
 @router.message(Command("game"))

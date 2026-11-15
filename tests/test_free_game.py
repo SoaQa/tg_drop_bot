@@ -208,3 +208,27 @@ async def test_game_commands_preserve_pending_captcha(monkeypatch):
     assert bot.session.await_count == 3
     assert await state.get_state() == 'CaptchaStates:answer'
     await dispatcher.storage.close()
+
+
+async def test_free_difficulty_defaults_easy_allows_hard_and_stays_transient(monkeypatch):
+    store = TransientRedis()
+    monkeypatch.setattr(free_game_web.Redis, 'from_url', lambda *a, **kw: store)
+    app = web.Application()
+    free_game_web.register_free_game_routes(app, Settings(BOT_TOKEN=TOKEN))
+    init = signed(at=int(time.time()))
+    async with TestClient(TestServer(app)) as client:
+        for difficulty in (None, 'hard', 'easy'):
+            response = await client.post('/play/api/start', json={
+                'initData': init, 'clientVersion': __version__,
+                **({'difficulty': difficulty} if difficulty else {}),
+            })
+            assert response.status == 200
+            state = await response.json()
+            assert state['difficulty'] == (difficulty or 'easy')
+            assert any('laser' in lane for lane in state['lanes']) == (difficulty == 'hard')
+            raw = json.loads(store.data['freefrog:session:'+state['token']])
+            assert not {'user', 'giveaway_id', 'hard_key', 'audit_id'} & raw.keys()
+        response = await client.post('/play/api/start', json={
+            'initData': init, 'clientVersion': __version__, 'difficulty': 'cheat',
+        })
+        assert response.status == 400

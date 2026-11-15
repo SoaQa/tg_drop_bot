@@ -22,14 +22,15 @@ export function windParticles(elapsed, height, seed = 0) {
   return particles;
 }
 
-export function drawWind(ctx, elapsed, height, seed) {
+export function drawWind(ctx, elapsed, height, seed, strength = 1) {
   ctx.save();
-  for (const particle of windParticles(elapsed, height, seed)) {
+  const particles=windParticles(elapsed,height,seed);
+  for (const particle of particles.slice(0,Math.ceil(particles.length*strength))) {
     ctx.save();
     ctx.translate(particle.x, particle.y);
     ctx.rotate(particle.angle);
     ctx.scale(particle.scale, particle.scale);
-    ctx.globalAlpha = particle.alpha;
+    ctx.globalAlpha = particle.alpha*strength;
     if (particle.paper) {
       ctx.fillStyle = '#f1e8ce';
       ctx.beginPath();ctx.moveTo(-12,-8);ctx.quadraticCurveTo(0,-3,12,-9);

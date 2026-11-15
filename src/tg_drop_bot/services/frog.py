@@ -71,15 +71,18 @@ def validate_init_data(raw: str, token: str, now: float) -> dict:
     return user
 
 
-def new_game(user: dict, giveaway_id: int, now: float) -> dict:
-    first = secrets.randbelow(3) + 1
-    second = secrets.randbelow(2) + 2 if first == 1 else secrets.randbelow(3) + 1
+def _easy_game(user: dict, giveaway_id: int, now: float, *, hard_layout: bool = False) -> dict:
+    first = 3 if hard_layout else secrets.randbelow(3) + 1
+    second = 3 if hard_layout else (
+        secrets.randbelow(2) + 2 if first == 1 else secrets.randbelow(2) + 1 if first == 2 else 1
+    )
     middle = first + 1
     roads = [*range(1, middle), *range(middle + 1, middle + 1 + second)]
     game: dict = {
         "user": user, "giveaway_id": giveaway_id, "started": now, "checked": now,
         "last_move": now - 1, "x": 3, "y": 0, "seq": 0, "status": "playing", "moves": [],
         "rows": first + second + 3,
+        "difficulty": "easy",
         "lanes": [
             {"row": row, "phase": secrets.randbelow(900) / 100,
              "kind": "car",
@@ -103,6 +106,41 @@ def new_game(user: dict, giveaway_id: int, now: float) -> dict:
     return game
 
 
+def new_game(user: dict, giveaway_id: int, now: float, *, difficulty: str = 'easy') -> dict:
+    if difficulty == 'easy':
+        return _easy_game(user, giveaway_id, now)
+    if difficulty != 'hard':
+        raise ValueError('invalid difficulty')
+    for _ in range(8):
+        game = _easy_game(user, giveaway_id, now, hard_layout=True)
+        game['difficulty'] = 'hard'
+        for lane in game['lanes']:
+            lane['speed'] *= 4/3
+            if lane['kind'] == 'car':
+                lane['laser'] = {'length': 2.0, 'period': 3.0, 'warning': 0.6,
+                                 'duration': 0.75, 'offset': secrets.randbelow(300)/100}
+        if has_timed_route(game):
+            return game
+    # Validated with the same buffered 400 ms route search, no random retry loop.
+    phases = (4.0, 7.14, 2.91, 1.98, 8.95, 2.29, 7.78)
+    offsets = (2.48, 0.68, 0.7, 0.13, 0.87, 1.71)
+    for i, lane in enumerate(game['lanes']):
+        lane['phase'] = phases[i]
+        if lane['kind'] == 'car':
+            lane['laser']['offset'] = offsets[i]
+        else:
+            lane['speed'] = 0.6
+    return game
+
+
+def laser_active(lane: dict, elapsed: float, vehicle: int = 0) -> bool:
+    laser = lane.get('laser')
+    if not laser:
+        return False
+    phase = (elapsed + laser['offset'] + vehicle*0.4) % laser['period']
+    return laser['warning'] <= phase < laser['warning']+laser['duration']
+
+
 def collision(game: dict, x: int, y: int, at: float, *, padding: float = 0) -> bool:
     for lane in game["lanes"]:
         if lane["row"] == y:
@@ -113,6 +151,16 @@ def collision(game: dict, x: int, y: int, at: float, *, padding: float = 0) -> b
             margin = (0.65 if lane.get("kind") == "mower" else 0.88) + padding
             if distance < margin:
                 return True
+            if lane.get('laser'):
+                sign = 1 if lane['speed'] > 0 else -1
+                for vehicle in range(lane.get('count', 1)):
+                    if not laser_active(lane, at-game['started'], vehicle):
+                        continue
+                    car = (lane['phase']+9*vehicle/lane['count']
+                           + lane['speed']*(at-game['started'])) % 9 - 1
+                    near, far = car+sign*0.65, car+sign*(0.65+lane['laser']['length'])
+                    if min(near, far)-0.25-padding < x < max(near, far)+0.25+padding:
+                        return True
     return False
 
 
@@ -177,5 +225,5 @@ def advance(
 
 def public_game(game: dict, now: float) -> dict:
     return {k: game[k] for k in ("x", "y", "seq", "status", "lanes", "started")} | {
-        "now": now, "rows": game.get("rows", 8),
+        "now": now, "rows": game.get("rows", 8), 'difficulty': game.get('difficulty', 'easy'),
     }

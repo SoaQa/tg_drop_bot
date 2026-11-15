@@ -113,6 +113,20 @@ class Participant(Base, TimestampMixin):
     winner: Mapped[Winner | None] = relationship(back_populates="participant")
 
 
+class HardGameAttempt(Base):
+    __tablename__ = "hard_game_attempts"
+    __table_args__ = (Index("ix_hard_game_top", "giveaway_id", "duration_ms", "user_id"),)
+
+    giveaway_id: Mapped[int] = mapped_column(
+        ForeignKey("giveaways.id", ondelete="CASCADE"), primary_key=True,
+    )
+    user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    attempt_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
+
+
 class Winner(Base, TimestampMixin):
     __tablename__ = "winners"
     __table_args__ = (

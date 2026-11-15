@@ -1,6 +1,7 @@
 """Standalone game: transient anonymous Redis state, no database or raffle access."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -56,6 +57,9 @@ def register_free_game_routes(app: web.Application, settings: Settings) -> None:
         current = f"freefrog:current:{owner}"
         if action == 'start':
             require_current_game_client(data)
+            difficulty = data.get('difficulty', 'easy')
+            if difficulty not in ('easy', 'hard'):
+                raise ValueError('invalid difficulty')
             quota = f"freefrog:start:{owner}:{int(now)//60}"
             if await redis.incr(quota) == 1:
                 await redis.expire(quota, 120)
@@ -64,7 +68,7 @@ def register_free_game_routes(app: web.Application, settings: Settings) -> None:
             previous = await redis.get(current)
             if previous:
                 await redis.delete(f"freefrog:session:{previous}")
-            game = new_game({}, 0, now)
+            game = await asyncio.to_thread(new_game, {}, 0, now, difficulty=difficulty)
             for key in ('user', 'giveaway_id', 'moves'):
                 game.pop(key, None)
             game['owner'] = owner

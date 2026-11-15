@@ -60,7 +60,7 @@ def test_no_teleport_replay_or_client_declared_win():
 
 
 @pytest.mark.parametrize(('first', 'second'), [
-    (1, 2), (1, 3), (2, 1), (2, 2), (2, 3), (3, 1), (3, 2), (3, 3),
+    (1, 2), (1, 3), (2, 1), (2, 2), (3, 1),
 ])
 def test_random_roads_and_mower_all_layouts(monkeypatch, first, second):
     counts = [first-1, second-2 if first == 1 else second-1]
@@ -94,7 +94,8 @@ def test_no_single_lane_on_both_roads(monkeypatch):
         assert first != 1 or second >= 2
         assert second != 1 or first >= 2
         seen.add((first, second))
-    assert len(seen) == 8
+    assert len(seen) == 5
+    assert all(a+b <= 4 for a,b in seen)
 
 
 def test_collision_between_requests_and_expiration():
@@ -156,7 +157,7 @@ def test_timing_aware_player_can_cross_generated_roads(monkeypatch):
 
 
 @pytest.mark.parametrize(('first', 'second'), [
-    (1, 2), (1, 3), (2, 1), (2, 2), (2, 3), (3, 1), (3, 2), (3, 3),
+    (1, 2), (1, 3), (2, 1), (2, 2), (3, 1),
 ])
 def test_fallback_is_solvable_and_blocks_delayed_autoclick(monkeypatch, first, second):
     from copy import deepcopy
@@ -185,3 +186,43 @@ def test_second_vehicle_is_visible_to_server_and_legacy_sessions_keep_one_vehicl
     assert collision(game, 3, 1, 1000)
     game['lanes'][0].pop('count')
     assert not collision(game, 3, 1, 1000)
+
+
+def test_hard_lasers_solvable_and_easy_has_no_lasers(monkeypatch):
+    import random
+
+    from tg_drop_bot.services.frog import has_timed_route
+
+    monkeypatch.setattr('tg_drop_bot.services.frog.secrets.randbelow', random.Random(409).randrange)
+    for _ in range(40):
+        easy = new_game({}, 1, 1000)
+        assert easy['difficulty'] == 'easy'
+        assert easy['rows'] <= 7
+        assert all('laser' not in lane for lane in easy['lanes'])
+        hard = new_game({}, 1, 1000, difficulty='hard')
+        assert hard['rows'] == 9 and hard['difficulty'] == 'hard'
+        assert sum('laser' in lane for lane in hard['lanes']) == 6
+        assert has_timed_route(hard)
+    # Degenerate RNG must still yield a vetted, solvable fallback.
+    monkeypatch.setattr('tg_drop_bot.services.frog.secrets.randbelow', lambda n: 0)
+    assert has_timed_route(new_game({}, 1, 1000, difficulty='hard'))
+
+
+def test_laser_warning_active_segment_and_collision_between_requests():
+    from tg_drop_bot.services.frog import laser_active
+
+    game = safe_game()
+    lane = game['lanes'][0]
+    lane.update(phase=6, speed=-.001, laser={
+        'period': 3, 'warning': .6, 'duration': .75, 'length': 2, 'offset': 0,
+    })
+    assert not laser_active(lane, .59)
+    assert laser_active(lane, .6)
+    assert not laser_active(lane, 1.35)
+    assert not collision(game, 3, 1, 1000.59)
+    assert collision(game, 3, 1, 1000.7)
+    assert not collision(game, 1, 1, 1000.7)
+    game['y'] = 1
+    # The laser fires and stops between these requests; it must still hit.
+    advance(game, 'wait', 0, 1002)
+    assert game['status'] == 'lost'
