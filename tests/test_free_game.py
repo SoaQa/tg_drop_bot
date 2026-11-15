@@ -91,7 +91,7 @@ async def test_game_buttons_in_private_and_group():
     assert button.web_app is None
 
 
-async def test_game_commands_preserve_pending_captcha():
+async def test_game_commands_preserve_pending_captcha(monkeypatch):
     from aiogram import Bot, Dispatcher
     from aiogram.types import Chat, Message, MessageEntity, Update, User
 
@@ -100,9 +100,9 @@ async def test_game_commands_preserve_pending_captcha():
 
     bot = Bot(TOKEN)
     bot.session = AsyncMock()
-    bot.get_me = AsyncMock(return_value=User(
+    monkeypatch.setattr(bot, 'get_me', AsyncMock(return_value=User(
         id=123456, is_bot=True, first_name='Bot', username='dropbot_dpi_bot',
-    ))
+    )))
     dispatcher = Dispatcher()
     dispatcher.include_router(router)
     state = dispatcher.fsm.get_context(bot=bot, chat_id=123, user_id=123)
