@@ -1,20 +1,21 @@
 // Visual-only debris: never modifies the authoritative game state or hit boxes.
 export function windParticles(elapsed, height, seed = 0) {
-  if (!Number.isFinite(elapsed) || elapsed < 1.5) return [];
-  const cycle = (elapsed - 1.5) % 12;
-  if (cycle > 5) return [];
+  if (!Number.isFinite(elapsed) || elapsed < 1) return [];
+  const cycle = (elapsed - 1) % 9;
+  if (cycle > 6) return [];
   const particles = [];
-  for (let i = 0; i < 7; i++) {
-    const age = cycle - i * 0.17;
-    if (age < 0 || age > 3.8) continue;
-    const progress = age / 3.8;
+  for (let i = 0; i < 14; i++) {
+    const age = cycle - i * 0.11;
+    if (age < 0 || age > 4.2) continue;
+    const progress = age / 4.2;
     const phase = i * 2.399 + seed * 6.28;
     particles.push({
-      x: -40 + progress * 500,
+      x: -45 + progress * 510,
       y: height * (0.16 + ((i * 0.173 + seed * 0.31) % 0.68))
-        + Math.sin(age * 3 + phase) * 12,
+        + Math.sin(age * 3 + phase) * 22,
       angle: phase + age * (i % 2 ? 1.8 : -1.4),
-      alpha: Math.min(1, progress * 7, (1 - progress) * 7) * 0.56,
+      alpha: Math.min(1, progress * 7, (1 - progress) * 7) * 0.68,
+      scale: 1.25 + (i % 4) * 0.15,
       paper: i % 3 === 0,
     });
   }
@@ -27,6 +28,7 @@ export function drawWind(ctx, elapsed, height, seed) {
     ctx.save();
     ctx.translate(particle.x, particle.y);
     ctx.rotate(particle.angle);
+    ctx.scale(particle.scale, particle.scale);
     ctx.globalAlpha = particle.alpha;
     if (particle.paper) {
       ctx.fillStyle = '#f1e8ce';
