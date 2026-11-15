@@ -3,6 +3,7 @@ WORKDIR /web
 COPY frontend/package*.json ./
 RUN npm ci
 COPY frontend/src.jsx ./src.jsx
+COPY frontend/wind.mjs ./wind.mjs
 RUN npm run build
 
 FROM ghcr.io/soaqa/tg_drop_bot:v0.17.0

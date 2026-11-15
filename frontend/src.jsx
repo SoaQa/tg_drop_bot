@@ -1,5 +1,6 @@
 import React, {useEffect, useRef, useState} from 'react';
 import {createRoot} from 'react-dom/client';
+import {drawWind} from './wind.mjs';
 
 const tg=window.Telegram?.WebApp;
 tg?.ready(); tg?.expand(); tg?.disableVerticalSwipes?.();
@@ -41,6 +42,7 @@ function App(){
  },[]);
  useEffect(()=>{
   let frame;
+  const motionPreference=window.matchMedia('(prefers-reduced-motion: reduce)');
   const draw=()=>{
    const c=canvas.current,ctx=c.getContext('2d'),g=current.current;
    const rows=g?.rows??8,W=420,H=rows*60,cw=60,ch=60;
@@ -68,6 +70,7 @@ function App(){
    const fx=(g?.x??3)*cw+cw/2,fy=H-((g?.y??0)+.5)*ch;
    ctx.fillStyle=g?.status==='lost'?'#ef8595':'#bbe955';ctx.beginPath();ctx.ellipse(fx,fy+4,19,15,0,0,Math.PI*2);ctx.fill();
    for(const dx of [-11,11]){ctx.beginPath();ctx.arc(fx+dx,fy-10,8,0,Math.PI*2);ctx.fill();ctx.fillStyle='#20382d';ctx.beginPath();ctx.arc(fx+dx,fy-12,3,0,Math.PI*2);ctx.fill();ctx.fillStyle='#bbe955';}
+   if(g&&!motionPreference.matches)drawWind(ctx,elapsed,H,(g.started%997)/997);
    frame=requestAnimationFrame(draw);
   };draw();return()=>cancelAnimationFrame(frame);
  },[]);
