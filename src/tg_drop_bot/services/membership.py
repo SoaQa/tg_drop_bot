@@ -29,10 +29,11 @@ FAST_CAPTCHA_WEIGHT_REASONS = {"fast_captcha", "newcomer_fast_captcha"}
 
 
 def draw_weight(is_newcomer: bool, response_ms: int | None) -> tuple[float, str]:
+    # Keep diagnostic facts for review, without changing anyone's odds.
     fast = response_ms is not None and 0 <= response_ms < FAST_CAPTCHA_THRESHOLD_MS
     if is_newcomer:
-        return (0.35, "newcomer_fast_captcha") if fast else (0.7, "newcomer")
-    return (0.5, "fast_captcha") if fast else (1.0, "unknown")
+        return (1.0, "newcomer_fast_captcha") if fast else (1.0, "newcomer")
+    return (1.0, "fast_captcha") if fast else (1.0, "unknown")
 
 
 async def snapshot_draw_eligibility(

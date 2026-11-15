@@ -138,15 +138,15 @@ async def test_leave_after_results_is_recorded_without_excluding_user(
     assert await s.scalar(select(ChannelExclusionPeriod)) is None
 
     assert await snapshot_draw_eligibility(s, g, [p]) == [p]
-    assert p.selection_weight == 0.7
+    assert p.selection_weight == 1
     p.captcha_response_ms = 1500
     assert await snapshot_draw_eligibility(s, g, [p]) == [p]
-    assert p.selection_weight == 0.35
+    assert p.selection_weight == 1
     assert p.selection_reason == "newcomer_fast_captcha"
     g.published_at = now
     g.finished_at = now + timedelta(hours=1)
     assert await snapshot_draw_eligibility(s, g, [p]) == [p]
-    assert p.selection_weight == 0.5
+    assert p.selection_weight == 1
     g.anti_abuse_enabled = False
     assert await snapshot_draw_eligibility(s, g, [p]) == [p]
     assert p.selection_weight == 1
@@ -254,3 +254,59 @@ async def test_draw_records_membership_exclusion(
     )
     assert await giveaways.draw_and_record_winners(s, cast(Bot, object()), g) == []
     assert p.draw_excluded and p.exclusion_reason == "Не выполнено условие подписки на канал"
+
+
+@pytest.mark.parametrize("anti_abuse", [True, False])
+async def test_draw_gives_equal_chances_but_keeps_bans_and_subscription_checks(
+    membership_session: AsyncSession, monkeypatch, anti_abuse: bool,
+) -> None:
+    from unittest.mock import Mock
+
+    from tg_drop_bot.services import giveaways
+    from tg_drop_bot.services.conditions import ConditionCheck
+
+    s = membership_session
+    c, g, p = await seed(s)
+    g.anti_abuse_enabled = anti_abuse
+    g.results_state = "pending"
+    g.winners_count = 1
+    p.selection_weight = 0.35
+    p.captcha_response_ms = 1000
+    others = [
+        Participant(
+            giveaway_id=g.id, user_id=uid, selection_weight=weight,
+            captcha_response_ms=duration, joined_at=utc_now(), captcha_passed_at=utc_now(),
+        )
+        for uid, weight, duration in [(11, 0.7, 8000), (12, 0.5, 1200), (13, 1, 9000)]
+    ]
+    s.add_all(others)
+    await s.flush()
+    await record_membership_event(
+        s, channel_id=c.id, user_id=p.user_id, update_id=100,
+        kind="join", occurred_at=utc_now(),
+    )
+    await prohibit_participation(s, c.id, 12, 1)
+    g.finished_at = utc_now()
+
+    async def check(bot, giveaway, user_id):
+        return ConditionCheck(
+            ok=user_id != 13, membership_status="left" if user_id == 13 else "member",
+        )
+
+    checker = AsyncMock(side_effect=check)
+    monkeypatch.setattr(giveaways, "check_participant_conditions", checker)
+    sampler = Mock()
+    sampler.sample.return_value = [p]
+    monkeypatch.setattr(giveaways.random, "SystemRandom", lambda: sampler)
+    assert await giveaways.draw_and_record_winners(s, cast(Bot, object()), g) == [p]
+    candidates, count = sampler.sample.call_args.args
+    assert count == 1
+    assert {row.user_id for row in candidates} == {10, 11}
+    assert all(row.selection_weight == 1 for row in [p, *others])
+    assert others[1].draw_excluded and others[2].draw_excluded
+    assert {call.args[2] for call in checker.await_args_list} == {10, 11, 13}
+
+    # A retry after recording results must reuse winners, without drawing again.
+    if anti_abuse:
+        assert await giveaways.draw_and_record_winners(s, cast(Bot, object()), g) == [p]
+        sampler.sample.assert_called_once()

@@ -628,24 +628,6 @@ def pick_winners(participants: list[Participant], winners_count: int) -> list[Pa
     return random.SystemRandom().sample(participants, count)
 
 
-def pick_weighted_winners(
-    participants: list[Participant],
-    winners_count: int,
-) -> list[Participant]:
-    import numpy as np
-
-    if winners_count <= 0 or not participants:
-        return []
-    weights = np.array([p.selection_weight for p in participants], dtype=float)
-    indices = np.random.default_rng().choice(
-        len(participants),
-        size=min(winners_count, len(participants)),
-        replace=False,
-        p=weights / weights.sum(),
-    )
-    return [participants[int(i)] for i in indices]
-
-
 async def finish_giveaway(
     session: AsyncSession,
     bot: Bot,
@@ -813,11 +795,7 @@ async def draw_and_record_winners(
             participant.draw_excluded = True
             participant.exclusion_reason = "Не выполнено условие подписки на канал"
 
-    selected = (
-        pick_weighted_winners(valid_participants, giveaway.winners_count or 0)
-        if giveaway.anti_abuse_enabled
-        else pick_winners(valid_participants, giveaway.winners_count or 0)
-    )
+    selected = pick_winners(valid_participants, giveaway.winners_count or 0)
 
     claimed = await try_results_state_transition(
         session,
