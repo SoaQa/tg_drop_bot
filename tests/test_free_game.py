@@ -89,3 +89,34 @@ async def test_game_buttons_in_private_and_group():
     button = group.answer.call_args.kwargs['reply_markup'].inline_keyboard[0][0]
     assert button.url == 'https://t.me/dropbot_dpi_bot?start=game'
     assert button.web_app is None
+
+
+async def test_game_commands_preserve_pending_captcha():
+    from aiogram import Bot, Dispatcher
+    from aiogram.types import Chat, Message, MessageEntity, Update, User
+
+    from tg_drop_bot.bot.free_game import router
+    from tg_drop_bot.services.dates import utc_now
+
+    bot = Bot(TOKEN)
+    bot.session = AsyncMock()
+    bot.get_me = AsyncMock(return_value=User(
+        id=123456, is_bot=True, first_name='Bot', username='dropbot_dpi_bot',
+    ))
+    dispatcher = Dispatcher()
+    dispatcher.include_router(router)
+    state = dispatcher.fsm.get_context(bot=bot, chat_id=123, user_id=123)
+    await state.set_state('CaptchaStates:answer')
+    for i, (text, chat_id, kind) in enumerate([
+        ('/game', 123, 'private'), ('/start game', 123, 'private'),
+        ('/game@dropbot_dpi_bot', -333, 'supergroup'),
+    ], 1):
+        update = Update(update_id=i, message=Message(
+            message_id=i, date=utc_now(), chat=Chat(id=chat_id, type=kind),
+            from_user=User(id=123, first_name='User', is_bot=False), text=text,
+            entities=[MessageEntity(type='bot_command', offset=0, length=len(text.split()[0]))],
+        ))
+        await dispatcher.feed_update(bot, update, settings=Settings(WEBHOOK_URL='https://example.com'))
+    assert bot.session.await_count == 3
+    assert await state.get_state() == 'CaptchaStates:answer'
+    await dispatcher.storage.close()
