@@ -59,7 +59,7 @@ def advance(game: dict, direction: str, seq: int, now: float) -> dict:
     if now < game["checked"] or now - game["started"] > 300:
         game["status"] = "expired"
         return game
-    if direction not in ("up", "down", "left", "right", "wait"):
+    if direction not in ("up", "wait"):
         raise ValueError("invalid move")
     # Sample the elapsed interval too: a client cannot skip time while standing in traffic.
     steps = max(1, math.ceil((now - game["checked"]) / 0.04))
@@ -74,9 +74,7 @@ def advance(game: dict, direction: str, seq: int, now: float) -> dict:
         return game
     if now - game["last_move"] < 0.22:
         return game
-    dx, dy = {"up": (0, 1), "down": (0, -1), "left": (-1, 0), "right": (1, 0)}[direction]
-    game["x"] = max(0, min(6, game["x"] + dx))
-    game["y"] = max(0, min(7, game["y"] + dy))
+    game["y"] = min(7, game["y"] + 1)
     game["last_move"] = now
     game["moves"].append({
         "t": round(now - game["started"], 3), "direction": direction,

@@ -69,12 +69,15 @@ def test_collision_between_requests_and_expiration():
     assert game["status"] == "expired"
 
 
-def test_stay_inside_board_and_never_move_after_collision():
+def test_only_forward_moves_and_never_move_after_collision():
     game = safe_game()
-    advance(game, "down", 0, 1000.3)
+    for direction in ("down", "left", "right"):
+        with pytest.raises(ValueError):
+            advance(game, direction, 0, 1000.3)
     assert game["y"] == 0
+    assert game["x"] == 3
     game["lanes"][0].update(phase=4, speed=0)
-    advance(game, "up", 1, 1000.6)
+    advance(game, "up", 0, 1000.6)
     assert game["status"] == "lost"
-    advance(game, "up", 2, 1001)
+    advance(game, "up", 1, 1001)
     assert game["y"] == 1

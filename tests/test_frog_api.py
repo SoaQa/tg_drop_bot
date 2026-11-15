@@ -96,6 +96,8 @@ async def test_api_rejects_fake_success_wrong_owner_replays_and_records_real_fin
             token = state['token']
             assert (await post('move', token=token, seq=0, passed=True)).status == 400
             assert (await post('move', token=token, seq=0, direction='won')).status == 400
+            for direction in ('left', 'right', 'down'):
+                assert (await post('move', token=token, seq=0, direction=direction)).status == 400
             assert (await client.post('/test/api/game/move', json={
                 "initData": signed(456, int(clock[0])), "token": token, "seq": 0, "direction": 'up',
             })).status == 400
