@@ -85,8 +85,11 @@ async def test_api_rejects_fake_success_wrong_owner_replays_and_records_real_fin
             gid = g.id
         async with TestClient(TestServer(app)) as client:
             init = signed(at=int(clock[0]))
+            nonce = None
             async def post(action, **kw):
-                return await client.post('/test/api/game/'+action, json={"initData": init, **kw})
+                return await client.post('/test/api/game/'+action, json={
+                    "initData": init, "nonce": nonce, **kw,
+                })
 
             r = await client.post('/test/api/game/start', json={"passed": True, "giveaway": gid})
             assert r.status == 400
@@ -94,6 +97,9 @@ async def test_api_rejects_fake_success_wrong_owner_replays_and_records_real_fin
             assert r.status == 200
             state = await r.json()
             token = state['token']
+            nonce = state['nonce']
+            assert (await post('move', token=token, nonce='forged', seq=0,
+                               direction='up')).status == 400
             assert (await post('move', token=token, seq=0, passed=True)).status == 400
             assert (await post('move', token=token, seq=0, direction='won')).status == 400
             for direction in ('left', 'right', 'down'):
@@ -114,7 +120,11 @@ async def test_api_rejects_fake_success_wrong_owner_replays_and_records_real_fin
                 r = await post('move', token=token, seq=seq, direction='up')
                 assert r.status == 200, (seq, await r.text())
                 state = await r.json()
+                old_nonce, nonce = nonce, state['nonce']
+                assert old_nonce != nonce
                 if seq == 0:
+                    assert (await post('move', token=token, nonce=old_nonce,
+                                       seq=state['seq'], direction='up')).status == 400
                     assert (await post('move', token=token, seq=0, direction='up')).status == 400
             assert state['status'] == 'won'
             # Retry the finish: exactly one participant and one notification.

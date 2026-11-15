@@ -32,18 +32,21 @@ def new_game(user: dict, giveaway_id: int, now: float) -> dict:
     first, second = secrets.randbelow(3) + 1, secrets.randbelow(3) + 1
     middle = first + 1
     roads = [*range(1, middle), *range(middle + 1, middle + 1 + second)]
-    return {
+    game: dict = {
         "user": user, "giveaway_id": giveaway_id, "started": now, "checked": now,
         "last_move": now - 1, "x": 3, "y": 0, "seq": 0, "status": "playing", "moves": [],
         "rows": first + second + 3,
         "lanes": [
             {"row": row, "phase": secrets.randbelow(900) / 100,
              "kind": "car",
-             "speed": (0.45 + secrets.randbelow(20) / 100) * (-1 if row % 2 else 1)}
+             "speed": (0.80 + secrets.randbelow(25) / 100) * (-1 if row % 2 else 1)}
             for row in roads
         ] + [{"row": middle, "phase": secrets.randbelow(900) / 100,
-              "kind": "mower", "speed": 0.32 * (-1 if secrets.randbelow(2) else 1)}],
+              "kind": "mower", "speed": 0.48 * (-1 if secrets.randbelow(2) else 1)}],
     }
+    # An immediate rush must meet visible traffic, not a free path to the finish.
+    game['lanes'][0]['phase'] = 4 + (secrets.randbelow(31) - 15) / 100
+    return game
 
 
 def collision(game: dict, x: int, y: int, at: float) -> bool:
@@ -77,7 +80,7 @@ def advance(game: dict, direction: str, seq: int, now: float) -> dict:
     game["seq"] += 1
     if game["status"] != "playing" or direction == "wait":
         return game
-    if now - game["last_move"] < 0.22:
+    if now - game["last_move"] < 0.28:
         return game
     finish = game.get("rows", 8) - 1
     game["y"] = min(finish, game["y"] + 1)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import hmac
 import json
 import secrets
 import time
@@ -65,7 +66,7 @@ def register_game_routes(
             countkey = f"frog:start:{uid}:{int(now) // 60}"
             if await redis.incr(countkey) == 1:
                 await redis.expire(countkey, 120)
-            if int(await redis.get(countkey) or 0) > 20:
+            if int(await redis.get(countkey) or 0) > 10:
                 raise web.HTTPTooManyRequests(text="Отдохните минуту и попробуйте снова.")
             gid = int(data["giveaway"])
             async with sessions() as session:
@@ -73,6 +74,7 @@ def register_game_routes(
                 if not giveaway or not is_giveaway_open(giveaway):
                     raise web.HTTPConflict(text="Приём заявок закрыт.")
             game = new_game(user, gid, now)
+            game['nonce'] = secrets.token_urlsafe(24)
             async with sessions() as session:
                 record = AuditLog(
                     giveaway_id=gid, actor_user_id=uid, action="frog.run.started",
@@ -94,7 +96,10 @@ def register_game_routes(
             game = json.loads(raw)
             if game["user"]["id"] != uid:
                 raise ValueError("wrong owner")
+            if not hmac.compare_digest(str(data.get('nonce', '')), game.get('nonce', 'invalid')):
+                raise ValueError("replayed command token")
             game = advance(game, data["direction"], data["seq"], now)
+            game['nonce'] = secrets.token_urlsafe(24)
         else:
             raise web.HTTPNotFound()
         # Persist before registering: process crashes cannot allow a replayed move to win twice.
@@ -134,7 +139,9 @@ def register_game_routes(
                 if result.created:
                     with contextlib.suppress(TelegramAPIError):
                         await bot.send_message(uid, "Лягушка добралась! Ваше участие засчитано.")
-        return web.json_response(public_game(game, now) | {"token": token}, headers={
+        return web.json_response(public_game(game, time.time()) | {
+            "token": token, "nonce": game['nonce'],
+        }, headers={
             "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
         })
 

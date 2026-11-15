@@ -5,7 +5,7 @@ from urllib.parse import urlencode
 
 import pytest
 
-from tg_drop_bot.services.frog import advance, new_game, public_game, validate_init_data
+from tg_drop_bot.services.frog import advance, collision, new_game, public_game, validate_init_data
 
 TOKEN = "123456:test"
 
@@ -102,3 +102,36 @@ def test_only_forward_moves_and_never_move_after_collision():
     assert game["status"] == "lost"
     advance(game, "up", 1, 1001)
     assert game["y"] == 1
+
+
+@pytest.mark.parametrize('interval', [0, 0.05, 0.15, 0.28, 0.35, 0.5])
+def test_blind_immediate_tapping_does_not_win(interval):
+    for _ in range(30):
+        game = new_game({'id': 123}, 1, 1000)
+        for i in range(15):
+            advance(game, 'up', game['seq'], 1000 + i*interval)
+        assert game['status'] == 'lost'
+
+
+def test_timing_aware_player_can_cross_generated_roads(monkeypatch):
+    import random
+
+    rng = random.Random(20261115)
+    monkeypatch.setattr('tg_drop_bot.services.frog.secrets.randbelow', rng.randrange)
+    for _ in range(40):
+        game = new_game({'id': 123}, 1, 1000)
+        reachable = {0}
+        finish = game['rows']-1
+        for tick in range(1, 151):
+            next_rows = set()
+            previous, now = 1000+(tick-1)*0.3, 1000+tick*0.3
+            for row in reachable:
+                if any(collision(game, 3, row, previous+i*0.03) for i in range(11)):
+                    continue
+                for target in (row, min(row+1, finish)):
+                    if not collision(game, 3, target, now):
+                        next_rows.add(target)
+            reachable = next_rows
+            if finish in reachable:
+                break
+        assert finish in reachable, 'No safe forward-only route within 45 seconds'

@@ -22,7 +22,7 @@ function App(){
   const g=current.current;if(!g||g.status!=='playing')return;
   if(pending.current){if(direction==='up')queuedTap.current=true;return;}
   pending.current=true;
-  try{const n=await call('move',{token:g.token,seq:g.seq,direction});accept(n);
+  try{const n=await call('move',{token:g.token,nonce:g.nonce,seq:g.seq,direction});accept(n);
    if(n.status==='won')setMessage('Получилось! Ваше участие засчитано. Можно вернуться в бот.');
    if(n.status==='lost')setMessage('Лягушка попала под колёса. Попробуйте ещё!');
    if(n.status==='expired')setMessage('Время игры истекло. Начните ещё раз.');
