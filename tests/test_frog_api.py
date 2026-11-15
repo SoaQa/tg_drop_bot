@@ -13,6 +13,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from test_frog import TOKEN, signed
 
+from tg_drop_bot import __version__
 from tg_drop_bot.config import Settings
 from tg_drop_bot.db.models import (
     AuditLog,
@@ -118,11 +119,13 @@ async def test_api_rejects_fake_success_wrong_owner_replays_and_records_real_fin
             nonce = None
             async def post(action, **kw):
                 return await client.post('/game/api/'+action, json={
-                    "initData": init, "nonce": nonce, **kw,
+                    "initData": init, "nonce": nonce, "clientVersion": __version__, **kw,
                 })
 
             r = await client.post('/game/api/start', json={"passed": True, "giveaway": gid})
             assert r.status == 400
+            assert (await post('start', giveaway=gid, clientVersion='0.27.0')).status == 409
+            assert (await post('start', giveaway=gid, clientVersion=None)).status == 409
             if queued:
                 assert (await post('start', giveaway=gid)).status == 409
                 monkeypatch.setattr(participation_worker, "check_participant_conditions", AsyncMock(
@@ -160,6 +163,7 @@ async def test_api_rejects_fake_success_wrong_owner_replays_and_records_real_fin
                     giveaway.deadline_at = utc_now()-timedelta(seconds=1)
                 assert (await client.post('/game/api/start', json={
                     "initData": signed(456, int(clock[0])), "giveaway": gid,
+                    "clientVersion": __version__,
                 })).status == 409
             r = await post('start', giveaway=gid)
             assert r.status == 200

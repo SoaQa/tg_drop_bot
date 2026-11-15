@@ -20,7 +20,7 @@ from tg_drop_bot.db.models import AuditLog, Participant, ParticipationFlow
 from tg_drop_bot.services.captcha import captcha_response_ms
 from tg_drop_bot.services.dates import utc_now
 from tg_drop_bot.services.frog import advance, new_game, public_game, validate_init_data
-from tg_drop_bot.services.game_page import render_game_page
+from tg_drop_bot.services.game_page import render_game_page, require_current_game_client
 from tg_drop_bot.services.giveaways import (
     get_giveaway,
     is_giveaway_open,
@@ -86,6 +86,7 @@ def register_game_routes(
         uid = user["id"]
         flow: ParticipationFlow | None = None
         if request.match_info["action"] == "start":
+            require_current_game_client(data)
             countkey = f"frog:start:{uid}:{int(now) // 60}"
             if await redis.incr(countkey) == 1:
                 await redis.expire(countkey, 120)

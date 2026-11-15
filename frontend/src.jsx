@@ -1,16 +1,18 @@
 import React, {useEffect, useRef, useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import {drawWind} from './wind.mjs';
+import {drawBeacon} from './beacon.mjs';
 
 const tg=window.Telegram?.WebApp;
 const freeMode=location.pathname.endsWith('/play/');
+const clientVersion=document.querySelector('meta[name="game-client-version"]')?.content||'';
 tg?.ready(); tg?.expand(); tg?.disableVerticalSwipes?.();
 function App(){
- const [game,setGame]=useState(null),[message,setMessage]=useState('Доведите лягушку до верхнего берега.'),[busy,setBusy]=useState(false);
+ const [game,setGame]=useState(null),[message,setMessage]=useState('Доберитесь до интернета.'),[busy,setBusy]=useState(false);
  const current=useRef(null),pending=useRef(false),canvas=useRef(null),sync=useRef(0),queuedTap=useRef(false);
  const gid=new URLSearchParams(location.search).get('giveaway');
  async function call(action,extra){
-  const r=await fetch(location.pathname+'api/'+action,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({initData:tg?.initData||'',...extra})});
+  const r=await fetch(location.pathname+'api/'+action,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({initData:tg?.initData||'',clientVersion,...extra})});
   if(!r.ok) throw new Error(await r.text());
   return r.json();
  }
@@ -54,7 +56,7 @@ function App(){
     ctx.fillStyle=road?'#283344':y===rows-1?'#b4f0b2':'#77ba87';ctx.fillRect(0,top,W,ch);
     if(road){ctx.setLineDash([13,15]);ctx.strokeStyle='#8795a6';ctx.beginPath();ctx.moveTo(0,top+ch);ctx.lineTo(W,top+ch);ctx.stroke();ctx.setLineDash([]);}
    }
-   ctx.fillStyle='#264e3b';ctx.font='bold 14px system-ui';ctx.textAlign='center';ctx.fillText('ФИНИШ',W/2,26);
+   ctx.fillStyle='#264e3b';ctx.font='bold 14px system-ui';ctx.textAlign='center';ctx.fillText('ИНТЕРНЕТ',W/2,26);
    const elapsed=g?g.now-g.started+(g.status==='playing'?(performance.now()-sync.current)/1000:0):0;
    (g?.lanes||[]).forEach((lane,i)=>{
     for(let vehicle=0;vehicle<(lane.count??1);vehicle++){
@@ -71,6 +73,7 @@ function App(){
     ctx.fillStyle=scheme.stripe;ctx.fillRect(px+8,py+3,62,4);ctx.fillRect(px+8,py+29,62,4);
     ctx.fillStyle='#344a60';ctx.fillRect(px+13,py+9,9,18);ctx.fillRect(px+57,py+9,9,18);
     ctx.fillStyle='#f9fbff';ctx.fillRect(px+25,py+9,29,18);
+    drawBeacon(ctx,px+26,py-2,elapsed+i*.13+vehicle*.17,motionPreference.matches);
     ctx.save();ctx.fillStyle=scheme.stripe;ctx.font='bold 10px system-ui';ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText('РКН',px+39,py+18);ctx.restore();
     }
    });

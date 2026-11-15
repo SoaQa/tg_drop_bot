@@ -7,6 +7,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from test_frog import TOKEN, signed
 from test_frog_api import MemoryRedis
 
+from tg_drop_bot import __version__
 from tg_drop_bot.bot.free_game import open_free_game
 from tg_drop_bot.config import Settings
 from tg_drop_bot.services import free_game_web
@@ -43,7 +44,9 @@ async def test_free_game_needs_no_database_and_erases_finished_state(monkeypatch
     async with TestClient(TestServer(app)) as client:
         init = signed(at=int(clock[0]))
         async def post(action, **data):
-            return await client.post('/play/api/'+action, json={'initData': init, **data})
+            return await client.post('/play/api/'+action, json={
+                'initData': init, 'clientVersion': __version__, **data,
+            })
 
         response = await client.get('/play/')
         assert response.status == 200
@@ -57,10 +60,19 @@ async def test_free_game_needs_no_database_and_erases_finished_state(monkeypatch
         assert 'anti-bot-verification' not in html
         assert 'automation-policy' not in html
         assert 'Автоматизированное прохождение' not in html
+        for version in (None, "0.27.0"):
+            response = await client.post('/play/api/start', json={
+                'initData': init, 'clientVersion': version,
+            })
+            assert response.status == 409
+            assert 'заново откройте' in await response.text()
         response = await post('start')
         assert response.status == 200
         state = await response.json()
         key = 'freefrog:session:'+state['token']
+        response = await post('start', clientVersion='0.27.0')
+        assert response.status == 409
+        assert key in store.data
         game = json.loads(store.data[key])
         assert not {'user', 'giveaway_id', 'moves', 'audit_id'} & game.keys()
         assert 0 < store.ttls[key] <= 60_000
@@ -100,7 +112,9 @@ async def test_abandoned_game_expires_and_active_game_cannot_extend_two_minutes(
     async with TestClient(TestServer(app)) as client:
         init = signed(at=int(clock[0]))
         async def start():
-            r = await client.post('/play/api/start', json={'initData': init})
+            r = await client.post('/play/api/start', json={
+                'initData': init, 'clientVersion': __version__,
+            })
             assert r.status == 200
             return await r.json()
 

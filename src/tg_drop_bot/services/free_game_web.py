@@ -13,7 +13,7 @@ from redis.asyncio import Redis
 
 from tg_drop_bot.config import Settings
 from tg_drop_bot.services.frog import advance, new_game, public_game, validate_init_data
-from tg_drop_bot.services.game_page import render_game_page
+from tg_drop_bot.services.game_page import render_game_page, require_current_game_client
 
 
 def register_free_game_routes(app: web.Application, settings: Settings) -> None:
@@ -55,6 +55,7 @@ def register_free_game_routes(app: web.Application, settings: Settings) -> None:
         now = time.time()
         current = f"freefrog:current:{owner}"
         if action == 'start':
+            require_current_game_client(data)
             quota = f"freefrog:start:{owner}:{int(now)//60}"
             if await redis.incr(quota) == 1:
                 await redis.expire(quota, 120)

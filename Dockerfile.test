@@ -4,6 +4,7 @@ COPY frontend/package*.json ./
 RUN npm ci
 COPY frontend/src.jsx ./src.jsx
 COPY frontend/wind.mjs ./wind.mjs
+COPY frontend/beacon.mjs ./beacon.mjs
 RUN npm run build
 
 FROM ghcr.io/soaqa/tg_drop_bot:v0.17.0
