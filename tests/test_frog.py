@@ -36,11 +36,12 @@ def safe_game():
     return game
 
 
-def test_seven_real_steps_reach_finish_and_public_state_hides_identity():
+def test_real_steps_reach_finish_and_public_state_hides_identity():
     game = safe_game()
-    for i in range(7):
+    finish = game['rows'] - 1
+    for i in range(finish):
         advance(game, "up", game["seq"], 1000 + (i+1)*0.3)
-    assert game["status"] == "won" and game["y"] == 7
+    assert game["status"] == "won" and game["y"] == finish
     assert "user" not in public_game(game, 1003)
     assert "giveaway_id" not in public_game(game, 1003)
 
@@ -56,6 +57,26 @@ def test_no_teleport_replay_or_client_declared_win():
     assert game["y"] == 1
     with pytest.raises(ValueError):
         advance(game, "up", 1, 1000.7)
+
+
+@pytest.mark.parametrize('first', [1, 2, 3])
+@pytest.mark.parametrize('second', [1, 2, 3])
+def test_random_roads_and_mower_all_layouts(monkeypatch, first, second):
+    counts = iter([first-1, second-1])
+    monkeypatch.setattr('tg_drop_bot.services.frog.secrets.randbelow',
+                        lambda n: next(counts) if n == 3 else 0)
+    game = new_game({'id': 123}, 1, 1000)
+    assert game['rows'] == first + second + 3
+    middle = first + 1
+    assert [lane['row'] for lane in game['lanes'] if lane['kind'] == 'car'] == [
+        *range(1, middle), *range(middle+1, middle+1+second),
+    ]
+    mower = [lane for lane in game['lanes'] if lane['kind'] == 'mower']
+    assert len(mower) == 1 and mower[0]['row'] == middle
+    mower[0].update(phase=4, speed=0)
+    game.update(y=middle)
+    advance(game, 'wait', 0, 1000.3)
+    assert game['status'] == 'lost'
 
 
 def test_collision_between_requests_and_expiration():

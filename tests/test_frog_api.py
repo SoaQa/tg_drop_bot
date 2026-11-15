@@ -108,7 +108,8 @@ async def test_api_rejects_fake_success_wrong_owner_replays_and_records_real_fin
             for lane in game['lanes']:
                 lane.update(phase=0, speed=0.45)
             memory.data['frog:session:'+token] = json.dumps(game)
-            for seq in range(7):
+            jumps = state['rows'] - 1
+            for seq in range(jumps):
                 clock[0] += 0.3
                 r = await post('move', token=token, seq=seq, direction='up')
                 assert r.status == 200, (seq, await r.text())
@@ -117,14 +118,14 @@ async def test_api_rejects_fake_success_wrong_owner_replays_and_records_real_fin
                     assert (await post('move', token=token, seq=0, direction='up')).status == 400
             assert state['status'] == 'won'
             # Retry the finish: exactly one participant and one notification.
-            assert (await post('move', token=token, seq=7, direction='wait')).status == 200
+            assert (await post('move', token=token, seq=jumps, direction='wait')).status == 200
             async with sessions() as s:
                 assert await s.scalar(select(func.count()).select_from(Participant)) == 1
                 record = await s.scalar(select(AuditLog).where(
                     AuditLog.action == 'frog.run.finished',
                 ))
                 assert record is not None
-                assert record.payload['move_count'] == 7
+                assert record.payload['move_count'] == jumps
                 assert record.payload['status'] == 'won'
             bot.send_message.assert_awaited_once()
             await post('start', giveaway=gid)

@@ -8,8 +8,6 @@ import math
 import secrets
 from urllib.parse import parse_qsl
 
-LANES = (1, 2, 3, 5, 6)
-
 
 def validate_init_data(raw: str, token: str, now: float) -> dict:
     pairs = parse_qsl(raw, keep_blank_values=True, strict_parsing=True)
@@ -31,14 +29,20 @@ def validate_init_data(raw: str, token: str, now: float) -> dict:
 
 
 def new_game(user: dict, giveaway_id: int, now: float) -> dict:
+    first, second = secrets.randbelow(3) + 1, secrets.randbelow(3) + 1
+    middle = first + 1
+    roads = [*range(1, middle), *range(middle + 1, middle + 1 + second)]
     return {
         "user": user, "giveaway_id": giveaway_id, "started": now, "checked": now,
         "last_move": now - 1, "x": 3, "y": 0, "seq": 0, "status": "playing", "moves": [],
+        "rows": first + second + 3,
         "lanes": [
             {"row": row, "phase": secrets.randbelow(900) / 100,
+             "kind": "car",
              "speed": (0.45 + secrets.randbelow(20) / 100) * (-1 if row % 2 else 1)}
-            for row in LANES
-        ],
+            for row in roads
+        ] + [{"row": middle, "phase": secrets.randbelow(900) / 100,
+              "kind": "mower", "speed": 0.32 * (-1 if secrets.randbelow(2) else 1)}],
     }
 
 
@@ -46,7 +50,8 @@ def collision(game: dict, x: int, y: int, at: float) -> bool:
     for lane in game["lanes"]:
         if lane["row"] == y:
             center = (lane["phase"] + lane["speed"] * (at - game["started"])) % 9 - 1
-            if abs(center - x) < 0.88:
+            margin = 0.65 if lane.get("kind") == "mower" else 0.88
+            if abs(center - x) < margin:
                 return True
     return False
 
@@ -74,7 +79,8 @@ def advance(game: dict, direction: str, seq: int, now: float) -> dict:
         return game
     if now - game["last_move"] < 0.22:
         return game
-    game["y"] = min(7, game["y"] + 1)
+    finish = game.get("rows", 8) - 1
+    game["y"] = min(finish, game["y"] + 1)
     game["last_move"] = now
     game["moves"].append({
         "t": round(now - game["started"], 3), "direction": direction,
@@ -82,10 +88,12 @@ def advance(game: dict, direction: str, seq: int, now: float) -> dict:
     })
     if collision(game, game["x"], game["y"], now):
         game["status"] = "lost"
-    elif game["y"] == 7:
+    elif game["y"] == finish:
         game["status"] = "won"
     return game
 
 
 def public_game(game: dict, now: float) -> dict:
-    return {k: game[k] for k in ("x", "y", "seq", "status", "lanes", "started")} | {"now": now}
+    return {k: game[k] for k in ("x", "y", "seq", "status", "lanes", "started")} | {
+        "now": now, "rows": game.get("rows", 8),
+    }
