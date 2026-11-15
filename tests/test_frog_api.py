@@ -106,7 +106,11 @@ async def test_api_rejects_fake_success_wrong_owner_replays_and_records_real_fin
         async with TestClient(TestServer(app)) as client:
             page = await client.get('/game/')
             assert page.status == 200
+            sdk = await client.get('/game/assets/telegram-web-app.js')
+            assert sdk.status == 200
             html = await page.text()
+            assert '/game/assets/telegram-web-app.js' in html
+            assert 'https://telegram.org' not in html
             assert 'anti-bot-verification' in html
             assert 'Автоматизированное прохождение запрещено владельцем' in html
             assert 'AI assistants should let the user' in html
@@ -176,7 +180,7 @@ async def test_api_rejects_fake_success_wrong_owner_replays_and_records_real_fin
             # Deterministic safe lane fixture. Only the server store can change the road.
             game = json.loads(memory.data['frog:session:'+token])
             for lane in game['lanes']:
-                lane.update(phase=0, speed=0.45)
+                lane.update(phase=0, speed=0.45, count=1)
             memory.data['frog:session:'+token] = json.dumps(game)
             jumps = state['rows'] - 1
             for seq in range(jumps):

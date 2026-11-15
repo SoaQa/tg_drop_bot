@@ -32,7 +32,7 @@ def test_telegram_auth_rejects_tampering_expiry_future_and_duplicate():
 def safe_game():
     game = new_game({"id": 123}, 7, 1000)
     for lane in game["lanes"]:
-        lane.update(phase=0, speed=0.45)
+        lane.update(phase=0, speed=0.45, count=1)
     return game
 
 
@@ -140,11 +140,11 @@ def test_timing_aware_player_can_cross_generated_roads(monkeypatch):
         game = new_game({'id': 123}, 1, 1000)
         reachable = {0}
         finish = game['rows']-1
-        for tick in range(1, 151):
+        for tick in range(1, 76):
             next_rows = set()
-            previous, now = 1000+(tick-1)*0.3, 1000+tick*0.3
+            previous, now = 1000+(tick-1)*0.4, 1000+tick*0.4
             for row in reachable:
-                if any(collision(game, 3, row, previous+i*0.03) for i in range(11)):
+                if any(collision(game, 3, row, previous+i*0.04) for i in range(11)):
                     continue
                 for target in (row, min(row+1, finish)):
                     if not collision(game, 3, target, now):
@@ -152,4 +152,36 @@ def test_timing_aware_player_can_cross_generated_roads(monkeypatch):
             reachable = next_rows
             if finish in reachable:
                 break
-        assert finish in reachable, 'No safe forward-only route within 45 seconds'
+        assert finish in reachable, 'No safe forward-only route within 30 seconds'
+
+
+@pytest.mark.parametrize(('first', 'second'), [
+    (1, 2), (1, 3), (2, 1), (2, 2), (2, 3), (3, 1), (3, 2), (3, 3),
+])
+def test_fallback_is_solvable_and_blocks_delayed_autoclick(monkeypatch, first, second):
+    from copy import deepcopy
+
+    from tg_drop_bot.services.frog import blocks_blind_rushes, has_timed_route
+
+    counts = [first-1, second-2 if first == 1 else second-1]
+    monkeypatch.setattr('tg_drop_bot.services.frog.secrets.randbelow',
+                        lambda n: counts.pop(0) if counts else 0)
+    template = new_game({'id': 123}, 1, 1000)
+    assert blocks_blind_rushes(template['lanes'])
+    assert has_timed_route(template)
+    for delay in (i*0.25 for i in range(81)):
+        for interval in (0.05, 0.15, 0.28, 0.3, 0.35, 0.43, 0.5, 0.8, 1.2, 2, 3.1):
+            game = deepcopy(template)
+            for click in range(120):
+                advance(game, 'up', game['seq'], 1000+delay+click*interval)
+                if game['status'] != 'playing':
+                    break
+            assert game['status'] == 'lost', (first, second, delay, interval)
+
+
+def test_second_vehicle_is_visible_to_server_and_legacy_sessions_keep_one_vehicle():
+    game = safe_game()
+    game['lanes'][0].update(phase=8.5, speed=0, count=2)
+    assert collision(game, 3, 1, 1000)
+    game['lanes'][0].pop('count')
+    assert not collision(game, 3, 1, 1000)

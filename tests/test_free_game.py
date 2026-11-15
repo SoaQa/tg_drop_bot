@@ -49,6 +49,11 @@ async def test_free_game_needs_no_database_and_erases_finished_state(monkeypatch
         assert response.status == 200
         html = await response.text()
         assert '/play/assets/app.js' in html
+        assert '/play/assets/telegram-web-app.js' in html
+        assert 'https://telegram.org' not in html
+        sdk = await client.get('/play/assets/telegram-web-app.js')
+        assert sdk.status == 200
+        assert 'Telegram.WebApp' in await sdk.text()
         assert 'anti-bot-verification' not in html
         assert 'automation-policy' not in html
         assert 'Автоматизированное прохождение' not in html
@@ -68,7 +73,7 @@ async def test_free_game_needs_no_database_and_erases_finished_state(monkeypatch
         assert (await post('move', token=state['token'], nonce='fake',
                            seq=0, direction='up')).status == 400
         for lane in game['lanes']:
-            lane.update(phase=0, speed=0.45)
+            lane.update(phase=0, speed=0.45, count=1)
         store.data[key] = json.dumps(game)
         for _ in range(game['rows']-1):
             clock[0] += 0.3
