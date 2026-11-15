@@ -47,7 +47,11 @@ async def test_free_game_needs_no_database_and_erases_finished_state(monkeypatch
 
         response = await client.get('/play/')
         assert response.status == 200
-        assert '/play/assets/app.js' in await response.text()
+        html = await response.text()
+        assert '/play/assets/app.js' in html
+        assert 'anti-bot-verification' not in html
+        assert 'automation-policy' not in html
+        assert 'Автоматизированное прохождение' not in html
         response = await post('start')
         assert response.status == 200
         state = await response.json()

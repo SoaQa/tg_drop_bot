@@ -19,6 +19,7 @@ from tg_drop_bot.config import Settings
 from tg_drop_bot.db.models import AuditLog
 from tg_drop_bot.services.dates import utc_now
 from tg_drop_bot.services.frog import advance, new_game, public_game, validate_init_data
+from tg_drop_bot.services.game_page import render_game_page
 from tg_drop_bot.services.giveaways import (
     get_giveaway,
     is_giveaway_open,
@@ -39,9 +40,12 @@ def register_game_routes(
 ) -> None:
     redis = Redis.from_url(settings.redis_url, decode_responses=True)
     assets = Path(__file__).parent.parent / "static" / "frog"
+    html = render_game_page((assets / "index.html").read_text(encoding="utf-8"), captcha=True)
 
-    async def page(request: web.Request) -> web.StreamResponse:
-        return web.FileResponse(assets / "index.html", headers={"Cache-Control": "no-store"})
+    async def page(request: web.Request) -> web.Response:
+        return web.Response(
+            text=html, content_type="text/html", headers={"Cache-Control": "no-store"},
+        )
 
     async def api(request: web.Request) -> web.Response:
         try:

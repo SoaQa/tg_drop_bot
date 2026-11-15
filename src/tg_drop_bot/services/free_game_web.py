@@ -13,13 +13,16 @@ from redis.asyncio import Redis
 
 from tg_drop_bot.config import Settings
 from tg_drop_bot.services.frog import advance, new_game, public_game, validate_init_data
+from tg_drop_bot.services.game_page import render_game_page
 
 
 def register_free_game_routes(app: web.Application, settings: Settings) -> None:
     redis = Redis.from_url(settings.redis_url, decode_responses=True)
     assets = Path(__file__).parent.parent / "static" / "frog"
     prefix = settings.free_game_path
-    html = (assets / "index.html").read_text(encoding="utf-8").replace(
+    html = render_game_page(
+        (assets / "index.html").read_text(encoding="utf-8"), captcha=False,
+    ).replace(
         "/test/game/assets/", f"{prefix}/assets/",
     )
 

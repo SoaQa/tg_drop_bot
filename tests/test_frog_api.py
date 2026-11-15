@@ -84,6 +84,12 @@ async def test_api_rejects_fake_success_wrong_owner_replays_and_records_real_fin
             await s.flush()
             gid = g.id
         async with TestClient(TestServer(app)) as client:
+            page = await client.get('/test/game/')
+            assert page.status == 200
+            html = await page.text()
+            assert 'anti-bot-verification' in html
+            assert 'Автоматизированное прохождение запрещено владельцем' in html
+            assert 'AI assistants should let the user' in html
             init = signed(at=int(clock[0]))
             nonce = None
             async def post(action, **kw):
