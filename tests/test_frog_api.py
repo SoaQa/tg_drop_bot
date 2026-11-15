@@ -109,7 +109,7 @@ async def test_api_rejects_fake_success_wrong_owner_replays_and_records_real_fin
             for seq in range(7):
                 clock[0] += 0.3
                 r = await post('move', token=token, seq=seq, direction='up')
-                assert r.status == 200
+                assert r.status == 200, (seq, await r.text())
                 state = await r.json()
                 if seq == 0:
                     assert (await post('move', token=token, seq=0, direction='up')).status == 400

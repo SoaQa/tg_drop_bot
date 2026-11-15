@@ -117,7 +117,7 @@ def register_game_routes(
                 if not giveaway or not is_giveaway_open(giveaway):
                     raise web.HTTPConflict(text="Приём заявок закрыт.")
                 result = await register_participant_after_condition_check(
-                    session, bot, giveaway, User.model_validate(game["user"]),
+                    session, bot, giveaway, User.model_validate(game["user"] | {"is_bot": False}),
                     received_at=utc_now(),
                 )
                 if result.participant is None:
