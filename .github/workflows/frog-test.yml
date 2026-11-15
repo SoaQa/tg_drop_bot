@@ -61,3 +61,10 @@ jobs:
           file: Dockerfile.test
           push: false
           tags: tg-drop-bot:frog-ci
+      - name: Build production image without publishing
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: false
+          tags: tg-drop-bot:free-game-ci
