@@ -59,12 +59,13 @@ def test_no_teleport_replay_or_client_declared_win():
         advance(game, "up", 1, 1000.7)
 
 
-@pytest.mark.parametrize('first', [1, 2, 3])
-@pytest.mark.parametrize('second', [1, 2, 3])
+@pytest.mark.parametrize(('first', 'second'), [
+    (1, 2), (1, 3), (2, 1), (2, 2), (2, 3), (3, 1), (3, 2), (3, 3),
+])
 def test_random_roads_and_mower_all_layouts(monkeypatch, first, second):
-    counts = iter([first-1, second-1])
+    counts = [first-1, second-2 if first == 1 else second-1]
     monkeypatch.setattr('tg_drop_bot.services.frog.secrets.randbelow',
-                        lambda n: next(counts) if n == 3 else 0)
+                        lambda n: counts.pop(0) if counts else 0)
     game = new_game({'id': 123}, 1, 1000)
     assert game['rows'] == first + second + 3
     middle = first + 1
@@ -77,6 +78,23 @@ def test_random_roads_and_mower_all_layouts(monkeypatch, first, second):
     game.update(y=middle)
     advance(game, 'wait', 0, 1000.3)
     assert game['status'] == 'lost'
+
+
+def test_no_single_lane_on_both_roads(monkeypatch):
+    import random
+
+    rng = random.Random(15112026)
+    monkeypatch.setattr('tg_drop_bot.services.frog.secrets.randbelow', rng.randrange)
+    seen = set()
+    for _ in range(1000):
+        game = new_game({'id': 123}, 1, 1000)
+        middle = next(lane['row'] for lane in game['lanes'] if lane['kind'] == 'mower')
+        first, second = middle-1, game['rows']-middle-2
+        assert 1 <= first <= 3 and 1 <= second <= 3
+        assert first != 1 or second >= 2
+        assert second != 1 or first >= 2
+        seen.add((first, second))
+    assert len(seen) == 8
 
 
 def test_collision_between_requests_and_expiration():

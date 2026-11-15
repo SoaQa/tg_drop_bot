@@ -29,7 +29,8 @@ def validate_init_data(raw: str, token: str, now: float) -> dict:
 
 
 def new_game(user: dict, giveaway_id: int, now: float) -> dict:
-    first, second = secrets.randbelow(3) + 1, secrets.randbelow(3) + 1
+    first = secrets.randbelow(3) + 1
+    second = secrets.randbelow(2) + 2 if first == 1 else secrets.randbelow(3) + 1
     middle = first + 1
     roads = [*range(1, middle), *range(middle + 1, middle + 1 + second)]
     game: dict = {
