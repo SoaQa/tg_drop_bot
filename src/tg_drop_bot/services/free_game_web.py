@@ -4,7 +4,6 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-import math
 import secrets
 import time
 from pathlib import Path
@@ -50,6 +49,7 @@ def register_free_game_routes(app: web.Application, settings: Settings) -> None:
             ) from None
 
     async def locked(action: str, data: dict, owner: str, now: float) -> web.Response:
+        now = time.time()
         current = f"freefrog:current:{owner}"
         if action == 'start':
             quota = f"freefrog:start:{owner}:{int(now)//60}"
@@ -66,27 +66,34 @@ def register_free_game_routes(app: web.Application, settings: Settings) -> None:
             game['owner'] = owner
             game['nonce'] = secrets.token_urlsafe(24)
             token = secrets.token_urlsafe(32)
-            await redis.set(current, token, ex=300)
         elif action == 'move':
             token = data['token']
             if token != await redis.get(current):
                 raise ValueError("wrong session")
             raw = await redis.get(f"freefrog:session:{token}")
             if not raw:
+                await redis.delete(current)
                 raise ValueError("expired session")
             game = json.loads(raw)
             if game['owner'] != owner or not hmac.compare_digest(
                 str(data.get('nonce', '')), game['nonce'],
             ):
                 raise ValueError("wrong owner or replay")
-            game = advance(game, data['direction'], data['seq'], now, record_moves=False)
+            if now >= game['started'] + 120:
+                game['status'] = 'expired'
+            else:
+                game = advance(game, data['direction'], data['seq'], now, record_moves=False)
             game['nonce'] = secrets.token_urlsafe(24)
         else:
             raise web.HTTPNotFound()
-        if game['status'] == 'playing':
-            ttl = max(1, math.ceil(game['started']+300-time.time()))
-            await redis.set(f"freefrog:session:{token}", json.dumps(game), ex=ttl)
+        remaining_ms = int((game['started']+120-time.time())*1000)
+        if game['status'] == 'playing' and remaining_ms > 0:
+            ttl = min(60_000, remaining_ms)
+            await redis.set(f"freefrog:session:{token}", json.dumps(game), px=ttl)
+            await redis.set(current, token, px=ttl)
         else:
+            if game['status'] == 'playing':
+                game['status'] = 'expired'
             await redis.delete(f"freefrog:session:{token}", current)
         return web.json_response(public_game(game, time.time()) | {
             'token': token, 'nonce': game['nonce'],

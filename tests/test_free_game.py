@@ -16,10 +16,17 @@ class TransientRedis(MemoryRedis):
     def __init__(self):
         super().__init__()
         self.ttls = {}
+        self.expires = {}
 
     async def set(self, k, v, **kw):
-        self.ttls[k] = kw.get('ex')
+        self.ttls[k] = kw.get('px', kw.get('ex', 0)*1000)
+        self.expires[k] = time.time() + self.ttls[k]/1000
         await super().set(k, v, **kw)
+
+    async def get(self, k):
+        if self.expires.get(k, float('inf')) <= time.time():
+            await self.delete(k)
+        return await super().get(k)
 
     async def delete(self, *keys):
         for key in keys:
@@ -47,7 +54,7 @@ async def test_free_game_needs_no_database_and_erases_finished_state(monkeypatch
         key = 'freefrog:session:'+state['token']
         game = json.loads(store.data[key])
         assert not {'user', 'giveaway_id', 'moves', 'audit_id'} & game.keys()
-        assert store.ttls[key] <= 300
+        assert 0 < store.ttls[key] <= 60_000
         assert len(game['owner']) == 64
         # Reusing someone else's token cannot authenticate another account.
         assert (await client.post('/play/api/move', json={
@@ -72,6 +79,64 @@ async def test_free_game_needs_no_database_and_erases_finished_state(monkeypatch
         assert not any(k.startswith('freefrog:current:') for k in store.data)
         assert (await post('move', token=state['token'], nonce=state['nonce'],
                            seq=state['seq'], direction='up')).status == 400
+
+
+async def test_abandoned_game_expires_and_active_game_cannot_extend_two_minutes(monkeypatch):
+    store = TransientRedis()
+    monkeypatch.setattr(free_game_web.Redis, 'from_url', lambda *a, **kw: store)
+    clock = [time.time()]
+    monkeypatch.setattr(free_game_web.time, 'time', lambda: clock[0])
+    app = web.Application()
+    free_game_web.register_free_game_routes(app, Settings(BOT_TOKEN=TOKEN))
+    async with TestClient(TestServer(app)) as client:
+        init = signed(at=int(clock[0]))
+        async def start():
+            r = await client.post('/play/api/start', json={'initData': init})
+            assert r.status == 200
+            return await r.json()
+
+        async def move(state):
+            return await client.post('/play/api/move', json={
+                'initData': init, 'token': state['token'], 'nonce': state['nonce'],
+                'seq': state['seq'], 'direction': 'wait',
+            })
+
+        state = await start()
+        key = 'freefrog:session:'+state['token']
+        current = next(k for k in store.data if k.startswith('freefrog:current:'))
+        # Browser closed: no request arrives for one minute.
+        clock[0] += 60
+        assert await store.get(key) is None
+        assert await store.get(current) is None
+        assert (await move(state)).status == 400
+
+        state = await start()
+        key = 'freefrog:session:'+state['token']
+        started = clock[0]
+        # The browser keeps polling while the player never moves.
+        for seconds in (40, 80, 110, 119):
+            clock[0] = started+seconds
+            response = await move(state)
+            assert response.status == 200
+            state = await response.json()
+            assert store.expires[key] <= started+120
+            assert store.expires[current] <= started+120
+            assert store.ttls[key] <= 60_000
+        clock[0] = started+120
+        assert await store.get(key) is None
+        assert await store.get(current) is None
+        assert (await move(state)).status == 400
+
+        # Server rejects an over-time session even if its Redis TTL was accidentally extended.
+        state = await start()
+        key = 'freefrog:session:'+state['token']
+        game = json.loads(store.data[key])
+        game['started'] = clock[0]-120
+        store.data[key] = json.dumps(game)
+        response = await move(state)
+        assert response.status == 200
+        assert (await response.json())['status'] == 'expired'
+        assert key not in store.data and current not in store.data
 
 
 async def test_game_buttons_in_private_and_group():
