@@ -59,7 +59,7 @@ jobs:
       - name: Test
         run: uv run pytest
       - name: Test wind animation
-        run: node --test frontend/wind.test.mjs frontend/beacon.test.mjs frontend/lasers.test.mjs
+        run: node --test frontend/wind.test.mjs frontend/beacon.test.mjs frontend/lasers.test.mjs frontend/game_runtime.test.mjs
       - name: Login to GHCR
         uses: docker/login-action@v3
         with:

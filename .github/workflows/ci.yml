@@ -55,7 +55,7 @@ jobs:
       - name: Test
         run: uv run pytest
       - name: Test wind animation
-        run: node --test frontend/wind.test.mjs frontend/beacon.test.mjs frontend/lasers.test.mjs
+        run: node --test frontend/wind.test.mjs frontend/beacon.test.mjs frontend/lasers.test.mjs frontend/game_runtime.test.mjs
       - name: Build image
         uses: docker/build-push-action@v6
         with:

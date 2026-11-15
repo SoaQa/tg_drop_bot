@@ -206,6 +206,17 @@ async def process_participation_job(
             ):
                 close_flow(flow)
                 job.reply_text = PARTICIPATION_DENIED
+            elif job.kind == "game_win":
+                from tg_drop_bot.services.game_finish import finish_game_job
+
+                job.reply_text = await finish_game_job(
+                    session,
+                    bot,
+                    settings,
+                    giveaway,
+                    flow,
+                    job,
+                )
             elif job.kind == "answer":
                 job.reply_text = await handle_answer(session, bot, settings, giveaway, flow, job)
             else:

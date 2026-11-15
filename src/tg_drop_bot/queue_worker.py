@@ -14,9 +14,11 @@ from aiogram.exceptions import TelegramNetworkError, TelegramRetryAfter, Telegra
 from aiogram.methods.base import Response, TelegramMethod, TelegramType
 from dramatiq.brokers.redis import RedisBroker
 from dramatiq.middleware import AsyncIO
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tg_drop_bot.config import Settings
+from tg_drop_bot.db.models import ParticipationJob
 from tg_drop_bot.db.session import create_session_factory
 from tg_drop_bot.services.participation_limits import ParticipationLimits
 from tg_drop_bot.services.participation_queue import lease_jobs_for_dispatch
@@ -104,12 +106,29 @@ def publish_jobs(starts: list[int], priority: list[int]) -> None:
         start_job.send(job_id)
 
 
+async def next_dispatch_batch(session: AsyncSession) -> tuple[list[int], list[int]]:
+    unfinished = (
+        select(ParticipationJob.id)
+        .where(
+            or_(
+                ParticipationJob.processed_at.is_(None),
+                ParticipationJob.reply_text.is_not(None),
+            )
+        )
+        .exists()
+    )
+    if not await session.scalar(select(unfinished)):
+        return [], []
+    priority = await lease_jobs_for_dispatch(session, priority=True, batch_size=16)
+    starts = await lease_jobs_for_dispatch(session, priority=False, batch_size=12)
+    return starts, priority
+
+
 async def dispatch_participation_jobs(sessions: async_sessionmaker[AsyncSession]) -> None:
     while True:
         try:
             async with sessions.begin() as session:
-                priority = await lease_jobs_for_dispatch(session, priority=True, batch_size=16)
-                starts = await lease_jobs_for_dispatch(session, priority=False, batch_size=12)
+                starts, priority = await next_dispatch_batch(session)
             if priority or starts:
                 await asyncio.to_thread(publish_jobs, starts, priority)
         except Exception:

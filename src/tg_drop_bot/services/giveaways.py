@@ -431,7 +431,8 @@ async def replace_published_image(
         ),
         reply_markup=(
             participation_keyboard(giveaway.id, (await bot.me()).username)
-            if giveaway.intake_closed_at is None else None
+            if giveaway.intake_closed_at is None
+            else None
         ),
     )
 
@@ -571,8 +572,10 @@ async def register_participant_after_condition_check(
     user: User,
     *,
     received_at: datetime | None = None,
+    condition_check: ConditionCheck | None = None,
 ) -> ParticipantRegistration:
-    condition_check = await check_participant_conditions(bot, giveaway, user.id)
+    if condition_check is None:
+        condition_check = await check_participant_conditions(bot, giveaway, user.id)
     if not condition_check.ok:
         return ParticipantRegistration(
             participant=None,
@@ -581,13 +584,16 @@ async def register_participant_after_condition_check(
         )
 
     if received_at is not None:
-        status = await session.scalar(select(Giveaway.status).where(
-            Giveaway.id == giveaway.id
-        ).with_for_update(read=True))
+        status = await session.scalar(
+            select(Giveaway.status).where(Giveaway.id == giveaway.id).with_for_update(read=True)
+        )
         if status != "published":
             return ParticipantRegistration(
-                participant=None, created=False, condition_check=ConditionCheck(
-                    ok=False, membership_status="closed",
+                participant=None,
+                created=False,
+                condition_check=ConditionCheck(
+                    ok=False,
+                    membership_status="closed",
                     user_message="Приём заявок в этом розыгрыше уже закрыт.",
                 ),
             )
@@ -595,7 +601,8 @@ async def register_participant_after_condition_check(
         await lock_user(session, giveaway.channel_id, user.id)
         if await get_active_exclusion(session, giveaway.channel_id, user.id) is not None:
             return ParticipantRegistration(
-                participant=None, created=False,
+                participant=None,
+                created=False,
                 condition_check=ConditionCheck(
                     ok=False, membership_status="excluded", user_message=PARTICIPATION_DENIED
                 ),
@@ -662,12 +669,13 @@ async def finish_giveaway(
         # First persist the cutoff. Webhooks that arrived just before it can
         # commit while the giveaway is draining, before the next scheduler pass.
         settling = now - locked.intake_closed_at < timedelta(seconds=2)
-        if newly_closed or settling or await giveaway_has_pending_intake(
-            session, locked.id, now=now
+        if (
+            newly_closed
+            or settling
+            or await giveaway_has_pending_intake(session, locked.id, now=now)
         ):
-            notify = (
-                locked.drain_alerted_at is None
-                and now - locked.intake_closed_at >= timedelta(minutes=5)
+            notify = locked.drain_alerted_at is None and now - locked.intake_closed_at >= timedelta(
+                minutes=5
             )
             if notify:
                 locked.drain_alerted_at = now
@@ -675,7 +683,9 @@ async def finish_giveaway(
             if newly_closed:
                 try:
                     await edit_published_message(
-                        bot, settings, giveaway,
+                        bot,
+                        settings,
+                        giveaway,
                         participants_count=await count_participants(session, giveaway.id),
                     )
                 except TelegramAPIError:
@@ -1046,7 +1056,8 @@ async def resume_unfinished_results(
 def is_giveaway_open(giveaway: Giveaway) -> bool:
     """Whether the giveaway still accepts participants (published, deadline not passed)."""
     if (
-        giveaway.status != "published" or giveaway.channel is None
+        giveaway.status != "published"
+        or giveaway.channel is None
         or giveaway.intake_closed_at is not None
     ):
         return False

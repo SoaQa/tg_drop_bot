@@ -14,6 +14,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -115,10 +116,20 @@ class Participant(Base, TimestampMixin):
 
 class HardGameAttempt(Base):
     __tablename__ = "hard_game_attempts"
-    __table_args__ = (Index("ix_hard_game_top", "giveaway_id", "duration_ms", "user_id"),)
+    __table_args__ = (
+        Index("ix_hard_game_top", "giveaway_id", "duration_ms", "user_id"),
+        Index(
+            "ix_hard_game_finish",
+            "giveaway_id",
+            "completed_at",
+            "user_id",
+            postgresql_where=text("completed_at IS NOT NULL"),
+        ),
+    )
 
     giveaway_id: Mapped[int] = mapped_column(
-        ForeignKey("giveaways.id", ondelete="CASCADE"), primary_key=True,
+        ForeignKey("giveaways.id", ondelete="CASCADE"),
+        primary_key=True,
     )
     user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     attempt_key: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -198,6 +209,13 @@ class ParticipationJob(Base):
     __table_args__ = (
         Index("ix_participation_jobs_flow_id", "flow_id", "id"),
         Index("ix_participation_jobs_dispatch_at", "dispatch_at", "id"),
+        Index(
+            "ix_participation_jobs_unfinished",
+            "kind",
+            "dispatch_at",
+            "id",
+            postgresql_where=text("processed_at IS NULL OR reply_text IS NOT NULL"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

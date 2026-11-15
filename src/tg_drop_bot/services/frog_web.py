@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import hmac
 import json
 import secrets
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from aiogram import Bot
@@ -14,15 +13,29 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, User, WebAppInfo
 from aiohttp import web
 from redis.asyncio import Redis
+from redis.exceptions import RedisError
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tg_drop_bot.config import Settings
-from tg_drop_bot.db.models import AuditLog, Participant, ParticipationFlow
+from tg_drop_bot.db.models import (
+    AuditLog,
+    HardGameAttempt,
+    Participant,
+    ParticipationFlow,
+    ParticipationJob,
+)
 from tg_drop_bot.services.captcha import captcha_response_ms
 from tg_drop_bot.services.dates import utc_now
-from tg_drop_bot.services.frog import advance, new_game, public_game, validate_init_data
+from tg_drop_bot.services.frog import advance, public_game, validate_init_data
 from tg_drop_bot.services.game_page import render_game_page, require_current_game_client
+from tg_drop_bot.services.game_runtime import (
+    command,
+    game_generator,
+    quota,
+    read_game_request,
+    store_game,
+)
 from tg_drop_bot.services.giveaways import (
     get_giveaway,
     is_giveaway_open,
@@ -33,203 +46,424 @@ from tg_drop_bot.services.participation_queue import lock_giveaway_intake
 
 
 def game_keyboard(settings: Settings, giveaway_id: int) -> InlineKeyboardMarkup:
-    url = f"{settings.webhook_url}{settings.frog_game_path}/?giveaway={giveaway_id}"
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="Играть и участвовать", web_app=WebAppInfo(url=url)),
-    ]])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Играть и участвовать",
+                    web_app=WebAppInfo(
+                        url=f"{settings.webhook_url}{settings.frog_game_path}/?giveaway={giveaway_id}",
+                    ),
+                ),
+            ]
+        ]
+    )
 
 
 def register_game_routes(
-    app: web.Application, settings: Settings,
-    sessions: async_sessionmaker[AsyncSession], bot: Bot,
+    app: web.Application, settings: Settings, sessions: async_sessionmaker[AsyncSession], bot: Bot
 ) -> None:
-    redis = Redis.from_url(settings.redis_url, decode_responses=True)
+    redis = Redis.from_url(
+        settings.redis_url, decode_responses=True, socket_connect_timeout=2, socket_timeout=3
+    )
+    generator = game_generator(app)
     assets = Path(__file__).parent.parent / "static" / "frog"
     prefix = settings.frog_game_path
     html = render_game_page(
-        (assets / "index.html").read_text(encoding="utf-8"), captcha=True,
-    ).replace("/test/game/assets/", f"{prefix}/assets/")
+        (assets / "index.html").read_text(encoding="utf-8"), captcha=True
+    ).replace(
+        "/test/game/assets/",
+        f"{prefix}/assets/",
+    )
 
-    async def queued_flow(session: AsyncSession, gid: int, uid: int) -> ParticipationFlow:
-        # Same intake lock as closing the draw: an admitted game keeps it draining.
-        giveaway = await lock_giveaway_intake(session, gid)
-        flow = await session.scalar(select(ParticipationFlow).where(
-            ParticipationFlow.giveaway_id == gid, ParticipationFlow.user_id == uid,
-        ).with_for_update())
-        if (
-            giveaway is None or giveaway.status != "published" or flow is None
-            or flow.status != "game" or flow.expires_at is None or flow.expires_at <= utc_now()
-        ):
-            raise web.HTTPConflict(text="Проверка истекла. Нажмите кнопку участия в боте.")
-        return flow
+    async def context(
+        session: AsyncSession, gid: int, uid: int, *, locked: bool, received: datetime | None = None
+    ):
+        if locked:
+            await lock_giveaway_intake(session, gid)
+        giveaway = await get_giveaway(session, gid)
+        if not giveaway or giveaway.status != "published":
+            raise web.HTTPConflict(text="Приём заявок закрыт.")
+        flow = None
+        if settings.participation_queue_enabled:
+            query = select(ParticipationFlow).where(
+                ParticipationFlow.giveaway_id == gid,
+                ParticipationFlow.user_id == uid,
+            )
+            if locked:
+                query = query.with_for_update()
+            flow = await session.scalar(query)
+            if (
+                flow is None
+                or flow.status != "game"
+                or flow.expires_at is None
+                or flow.expires_at <= (received or utc_now())
+            ):
+                raise web.HTTPConflict(text="Проверка истекла. Нажмите кнопку участия в боте.")
+        elif not is_giveaway_open(giveaway):
+            raise web.HTTPConflict(text="Приём заявок закрыт.")
+        return giveaway, flow
+
+    async def persist(game: dict, token: str) -> None:
+        ttl = max(1000, min(360_000, int((game["started"] + 360 - time.time()) * 1000)))
+        await store_game(
+            redis, f"frog:current:{game['user']['id']}", f"frog:session:{token}", token, game, ttl
+        )
+
+    def response(game: dict, token: str) -> web.Response:
+        return web.json_response(
+            public_game(game, time.time())
+            | {
+                "token": token,
+                "nonce": game["nonce"],
+            },
+            headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+        )
+
+    def payload(game: dict) -> dict:
+        result = {
+            key: game.get(key)
+            for key in (
+                "user",
+                "started",
+                "checked",
+                "difficulty",
+                "hard_key",
+                "challenge_id",
+            )
+        }
+        if game["status"] == "won":
+            result["state"] = game.copy()
+        return {
+            "started": game["started"],
+            "finished": game["checked"],
+            "status": game["status"],
+            "seconds": round(game["checked"] - game["started"], 3),
+            "moves": game["moves"],
+            "move_count": len(game["moves"]),
+            "lanes": game["lanes"],
+            "difficulty": game.get("difficulty", "easy"),
+            "game_result": result,
+        }
+
+    async def prepare_result(game: dict) -> None:
+        if game.get("logged"):
+            return
+        uid, gid = game["user"]["id"], game["giveaway_id"]
+        async with sessions.begin() as session:
+            # A negative update ID is reserved for a server-verified game result.
+            job = (
+                await session.scalar(
+                    select(ParticipationJob)
+                    .where(
+                        ParticipationJob.update_id == -game["audit_id"],
+                    )
+                    .with_for_update()
+                )
+                if settings.participation_queue_enabled
+                else None
+            )
+            if game["status"] == "won" and settings.participation_queue_enabled and job is None:
+                _, flow = await context(
+                    session,
+                    gid,
+                    uid,
+                    locked=True,
+                    received=datetime.fromtimestamp(game["checked"], UTC),
+                )
+                assert flow is not None
+                if flow.challenge_id != game["challenge_id"]:
+                    raise web.HTTPConflict(text="Проверка заменена. Откройте новую игру из бота.")
+                session.add(
+                    ParticipationJob(
+                        update_id=-game["audit_id"],
+                        flow_id=flow.id,
+                        kind="game_win",
+                        received_at=datetime.fromtimestamp(game["checked"], UTC),
+                        challenge_id=game["audit_id"],
+                        dispatch_at=utc_now() + timedelta(seconds=15),
+                    )
+                )
+            await session.execute(
+                update(AuditLog)
+                .where(
+                    AuditLog.id == game["audit_id"],
+                    AuditLog.actor_user_id == uid,
+                )
+                .values(action="frog.run.finished", payload=payload(game))
+            )
+        game["logged"] = True
+
+    async def finalize(game: dict) -> None:
+        if game.get("finalized"):
+            return
+        uid, gid = game["user"]["id"], game["giveaway_id"]
+        async with sessions() as session:
+            existing = await session.scalar(
+                select(Participant.id).where(
+                    Participant.giveaway_id == gid,
+                    Participant.user_id == uid,
+                )
+            )
+            snapshot = await get_giveaway(session, gid)
+        condition = None
+        if not existing:
+            if snapshot is None:
+                raise web.HTTPConflict(text="Розыгрыш недоступен.")
+            # No database connection or giveaway-wide lock is held during Telegram I/O.
+            from tg_drop_bot.services import giveaways
+
+            async with asyncio.timeout(12):
+                condition = await giveaways.check_participant_conditions(bot, snapshot, uid)
+            if condition.membership_status == "check_failed":
+                raise web.HTTPServiceUnavailable(
+                    text="Проверка подписки временно недоступна. Повторяем.",
+                )
+        created = False
+        async with sessions.begin() as session:
+            job = (
+                await session.scalar(
+                    select(ParticipationJob)
+                    .where(
+                        ParticipationJob.update_id == -game["audit_id"],
+                    )
+                    .with_for_update()
+                )
+                if settings.participation_queue_enabled
+                else None
+            )
+            # Match the worker's lock order: job -> giveaway -> flow.
+            if await session.scalar(
+                select(Participant.id).where(
+                    Participant.giveaway_id == gid,
+                    Participant.user_id == uid,
+                )
+            ):
+                if game.get("difficulty") == "hard" and game.get("hard_key"):
+                    await record_hard_completion(
+                        session,
+                        gid,
+                        uid,
+                        game["hard_key"],
+                        round((game["checked"] - game["started"]) * 1000),
+                        datetime.fromtimestamp(game["checked"], UTC),
+                    )
+                if job is not None and job.processed_at is None:
+                    job.processed_at, job.reply_text = utc_now(), None
+                game["finalized"] = True
+                return
+            assert condition is not None and snapshot is not None
+            giveaway, flow = await context(
+                session,
+                gid,
+                uid,
+                locked=True,
+                received=datetime.fromtimestamp(game["checked"], UTC),
+            )
+            if flow is not None and flow.challenge_id != game["challenge_id"]:
+                raise web.HTTPConflict(text="Проверка заменена. Откройте новую игру из бота.")
+            if giveaway.channel_id != snapshot.channel_id:
+                raise web.HTTPServiceUnavailable(text="Канал изменился. Повторяем проверку.")
+            registration = await register_participant_after_condition_check(
+                session,
+                bot,
+                giveaway,
+                User.model_validate(game["user"] | {"is_bot": False}),
+                received_at=datetime.fromtimestamp(game["checked"], UTC),
+                condition_check=condition,
+            )
+            if registration.participant is None:
+                raise web.HTTPForbidden(
+                    text=registration.condition_check.user_message
+                    or "Условия участия не выполнены."
+                )
+            created = registration.created
+            if created:
+                registration.participant.captcha_response_ms = captcha_response_ms(
+                    flow.captcha_sent_at if flow else None,
+                    datetime.fromtimestamp(game["checked"], UTC),
+                )
+                session.add(
+                    AuditLog(
+                        giveaway_id=gid,
+                        actor_user_id=uid,
+                        action="participant.frog_passed",
+                        payload={"seconds": round(game["checked"] - game["started"], 2)},
+                    )
+                )
+            if flow is not None:
+                from tg_drop_bot.services.participation_worker import close_flow
+
+                close_flow(flow)
+            if game.get("difficulty") == "hard" and game.get("hard_key"):
+                await record_hard_completion(
+                    session,
+                    gid,
+                    uid,
+                    game["hard_key"],
+                    round((game["checked"] - game["started"]) * 1000),
+                    datetime.fromtimestamp(game["checked"], UTC),
+                )
+            if job is not None:
+                job.processed_at = utc_now()
+                job.reply_text = "Лягушка добралась! Ваше участие засчитано." if created else None
+                job.dispatch_at = utc_now()
+        game["finalized"] = True
+        if created and not settings.participation_queue_enabled:
+            with contextlib.suppress(TelegramAPIError, TimeoutError):
+                async with asyncio.timeout(3):
+                    await bot.send_message(uid, "Лягушка добралась! Ваше участие засчитано.")
+
+    async def locked(action: str, data: dict, user: dict) -> web.Response:
+        uid = user["id"]
+        if action == "start":
+            require_current_game_client(data)
+            gid = int(data["giveaway"])
+            token = await redis.get(f"frog:current:{uid}")
+            raw = await redis.get(f"frog:session:{token}") if token else None
+            previous = json.loads(raw) if raw else None
+            if not (
+                previous and previous.get("giveaway_id") == gid and previous.get("status") == "won"
+            ):
+                async with sessions() as session:
+                    proof = await session.scalar(
+                        select(AuditLog)
+                        .join(
+                            ParticipationJob,
+                            ParticipationJob.challenge_id == AuditLog.id,
+                        )
+                        .join(ParticipationFlow, ParticipationFlow.id == ParticipationJob.flow_id)
+                        .where(
+                            ParticipationJob.kind == "game_win",
+                            ParticipationJob.processed_at.is_(None),
+                            ParticipationFlow.user_id == uid,
+                            ParticipationFlow.giveaway_id == gid,
+                            AuditLog.actor_user_id == uid,
+                            AuditLog.giveaway_id == gid,
+                        )
+                        .limit(1)
+                    )
+                    if proof is not None:
+                        previous = proof.payload.get("game_result", {}).get("state")
+                        if not previous or previous.get("status") != "won":
+                            raise web.HTTPServiceUnavailable(
+                                text="Финиш принят, повторяем проверку."
+                            )
+                        previous["logged"] = True
+                        token = secrets.token_urlsafe(32)
+            if (
+                previous
+                and previous["giveaway_id"] == gid
+                and previous.get("user", {}).get("id") == uid
+                and previous["status"] == "won"
+            ):
+                game = previous
+            else:
+                async with sessions() as session:
+                    _, flow = await context(session, gid, uid, locked=False)
+                    challenge_id = flow.challenge_id if flow else None
+                    if await session.scalar(
+                        select(Participant.id).where(
+                            Participant.giveaway_id == gid,
+                            Participant.user_id == uid,
+                        )
+                    ):
+                        raise web.HTTPConflict(text="Ваше участие уже засчитано.")
+                    spent = await session.get(HardGameAttempt, (gid, uid)) is not None
+                if (
+                    previous
+                    and previous["giveaway_id"] == gid
+                    and previous.get("user", {}).get("id") == uid
+                    and previous.get("difficulty") == "hard"
+                    and previous.get("challenge_id") == challenge_id
+                    and previous["status"] == "playing"
+                ):
+                    previous = advance(previous, "wait", previous["seq"], time.time())
+                    if previous["status"] == "playing":
+                        await persist(previous, token)
+                        return response(previous, token)
+                    await prepare_result(previous)
+                # CPU generation is outside transactions and giveaway-wide locks.
+                await quota(redis, f"frog:start:{uid}:{int(time.time()) // 60}", 10, 120)
+                game = await generator.generate(user, gid, "easy" if spent else "hard")
+                hard_key = secrets.token_urlsafe(24)
+                async with sessions.begin() as session:
+                    _, flow = await context(session, gid, uid, locked=True)
+                    challenge_id = flow.challenge_id if flow else None
+                    if await session.scalar(
+                        select(Participant.id).where(
+                            Participant.giveaway_id == gid,
+                            Participant.user_id == uid,
+                        )
+                    ):
+                        raise web.HTTPConflict(text="Ваше участие уже засчитано.")
+                    hard = await claim_hard_attempt(session, gid, uid, hard_key)
+                if hard != (game["difficulty"] == "hard"):
+                    game = await generator.generate(user, gid, "hard" if hard else "easy")
+                issued = time.time()
+                game.update(
+                    started=issued,
+                    checked=issued,
+                    last_move=issued - 1,
+                    hard_key=hard_key if hard else None,
+                    challenge_id=challenge_id,
+                    nonce=secrets.token_urlsafe(24),
+                )
+                async with sessions.begin() as session:
+                    record = AuditLog(
+                        giveaway_id=gid,
+                        actor_user_id=uid,
+                        action="frog.run.started",
+                        payload={
+                            "started": issued,
+                            "status": "started",
+                            "difficulty": game["difficulty"],
+                        },
+                    )
+                    session.add(record)
+                    await session.flush()
+                    game["audit_id"] = record.id
+                token = secrets.token_urlsafe(32)
+        elif action == "move":
+            token = data["token"]
+            if not isinstance(token, str) or len(token) > 100:
+                raise ValueError("invalid token")
+            current, raw = await redis.mget(f"frog:current:{uid}", f"frog:session:{token}")
+            if token != current or raw is None:
+                raise ValueError("expired or replaced session")
+            game = json.loads(raw)
+            if game["user"]["id"] != uid:
+                raise ValueError("wrong owner")
+            game = command(game, data, time.time())
+        else:
+            raise web.HTTPNotFound()
+        await persist(game, token)
+        if game["status"] != "playing":
+            await prepare_result(game)
+            await persist(game, token)
+        if game["status"] == "won":
+            await finalize(game)
+            await persist(game, token)
+        return response(game, token)
 
     async def page(request: web.Request) -> web.Response:
         return web.Response(
-            text=html, content_type="text/html", headers={"Cache-Control": "no-store"},
+            text=html, content_type="text/html", headers={"Cache-Control": "no-store"}
         )
 
     async def api(request: web.Request) -> web.Response:
         try:
-            data = await request.json()
+            data = await read_game_request(request)
             user = validate_init_data(data["initData"], settings.bot_token, time.time())
-            uid = user["id"]
-            # Quotas are identity-bound, not Telegram webhook IP-bound.
-            key = f"frog:rate:{uid}:{int(time.time()) // 10}"
-            if await redis.incr(key) == 1:
-                await redis.expire(key, 20)
-            if int(await redis.get(key) or 0) > 100:
-                raise web.HTTPTooManyRequests(text="Слишком много запросов. Подождите немного.")
-            async with redis.lock(f"frog:lock:{uid}", timeout=30, blocking_timeout=2):
-                return await locked(request, data, user)
-        except (ValueError, KeyError, TypeError, json.JSONDecodeError):
+            await quota(redis, f"frog:rate:{user['id']}:{int(time.time()) // 10}", 100, 20)
+            async with redis.lock(f"frog:lock:{user['id']}", timeout=30, blocking_timeout=2):
+                return await locked(request.match_info["action"], data, user)
+        except (ValueError, KeyError, TypeError):
             raise web.HTTPBadRequest(text="Проверка устарела. Откройте игру из бота.") from None
-
-    async def locked(request: web.Request, data: dict, user: dict) -> web.Response:
-        now = time.time()
-        uid = user["id"]
-        flow: ParticipationFlow | None = None
-        if request.match_info["action"] == "start":
-            require_current_game_client(data)
-            countkey = f"frog:start:{uid}:{int(now) // 60}"
-            if await redis.incr(countkey) == 1:
-                await redis.expire(countkey, 120)
-            if int(await redis.get(countkey) or 0) > 10:
-                raise web.HTTPTooManyRequests(text="Отдохните минуту и попробуйте снова.")
-            gid = int(data["giveaway"])
-            challenge_id = None
-            async with sessions() as session:
-                if settings.participation_queue_enabled:
-                    flow = await queued_flow(session, gid, uid)
-                    challenge_id = flow.challenge_id
-                else:
-                    await lock_giveaway_intake(session, gid)
-                    giveaway = await get_giveaway(session, gid)
-                    if not giveaway or not is_giveaway_open(giveaway):
-                        raise web.HTTPConflict(text="Приём заявок закрыт.")
-                if await session.scalar(select(Participant.id).where(
-                    Participant.giveaway_id == gid, Participant.user_id == uid,
-                )):
-                    raise web.HTTPConflict(text="Ваше участие уже засчитано.")
-                # Refreshing an unfinished hard attempt resumes it rather than granting a retry.
-                current = await redis.get(f'frog:current:{uid}')
-                raw = await redis.get(f'frog:session:{current}') if current else None
-                previous = json.loads(raw) if raw else None
-                if (previous and previous['giveaway_id'] == gid
-                    and previous.get('user', {}).get('id') == uid
-                    and previous.get('difficulty') == 'hard'
-                    and previous.get('challenge_id') == challenge_id
-                    and previous['status'] == 'playing'):
-                    previous = advance(previous, 'wait', previous['seq'], now)
-                    if previous['status'] == 'playing':
-                        await redis.set(f'frog:session:{current}', json.dumps(previous), ex=360)
-                        return web.json_response(public_game(previous, now) | {
-                            'token': current, 'nonce': previous['nonce'],
-                        }, headers={'Cache-Control': 'no-store'})
-                hard_key = secrets.token_urlsafe(24)
-                hard = await claim_hard_attempt(session, gid, uid, hard_key)
-                game = await asyncio.to_thread(
-                    new_game, user, gid, now, difficulty='hard' if hard else 'easy',
-                )
-                game['hard_key'] = hard_key if hard else None
-                game["challenge_id"] = challenge_id
-                game['nonce'] = secrets.token_urlsafe(24)
-                record = AuditLog(
-                    giveaway_id=gid, actor_user_id=uid, action="frog.run.started",
-                    payload={"started": now, "status": "started", "difficulty": game['difficulty']},
-                )
-                session.add(record)
-                await session.flush()
-                game["audit_id"] = record.id
-                await session.commit()
-            token = secrets.token_urlsafe(32)
-            await redis.set(f"frog:current:{uid}", token, ex=360)
-        elif request.match_info["action"] == "move":
-            token = data["token"]
-            if token != await redis.get(f"frog:current:{uid}"):
-                raise ValueError("replaced session")
-            raw = await redis.get(f"frog:session:{token}")
-            if raw is None:
-                raise ValueError("expired session")
-            game = json.loads(raw)
-            if game["user"]["id"] != uid:
-                raise ValueError("wrong owner")
-            if not hmac.compare_digest(str(data.get('nonce', '')), game.get('nonce', 'invalid')):
-                raise ValueError("replayed command token")
-            game = advance(game, data["direction"], data["seq"], now)
-            game['nonce'] = secrets.token_urlsafe(24)
-        else:
-            raise web.HTTPNotFound()
-        # Persist before registering: process crashes cannot allow a replayed move to win twice.
-        await redis.set(f"frog:session:{token}", json.dumps(game), ex=360)
-        if game["status"] != "playing" and not game.get("logged"):
-            async with sessions() as session:
-                await session.execute(update(AuditLog).where(
-                    AuditLog.id == game["audit_id"], AuditLog.actor_user_id == uid,
-                ).values(action="frog.run.finished", payload={
-                    "started": game["started"], "finished": now, "status": game["status"],
-                    "seconds": round(now-game["started"], 3), "moves": game["moves"],
-                    "move_count": len(game["moves"]), "lanes": game["lanes"],
-                    "difficulty": game.get('difficulty', 'easy'),
-                }))
-                await session.commit()
-            game["logged"] = True
-            await redis.set(f"frog:session:{token}", json.dumps(game), ex=360)
-        if game["status"] == "won":
-            async with sessions() as session:
-                # A committed registration can be retried after a lost HTTP response.
-                existing = await session.scalar(select(Participant.id).where(
-                    Participant.giveaway_id == game["giveaway_id"], Participant.user_id == uid,
-                ))
-                if existing:
-                    return web.json_response(public_game(game, time.time()) | {
-                        "token": token, "nonce": game['nonce'],
-                    }, headers={"Cache-Control": "no-store"})
-                flow = None
-                if settings.participation_queue_enabled:
-                    flow = await queued_flow(session, game["giveaway_id"], uid)
-                    if flow.challenge_id != game["challenge_id"]:
-                        raise web.HTTPConflict(
-                            text="Проверка заменена. Откройте новую игру из бота.",
-                        )
-                giveaway = await get_giveaway(session, game["giveaway_id"])
-                if not giveaway or (flow is None and not is_giveaway_open(giveaway)):
-                    raise web.HTTPConflict(text="Приём заявок закрыт.")
-                result = await register_participant_after_condition_check(
-                    session, bot, giveaway, User.model_validate(game["user"] | {"is_bot": False}),
-                    received_at=utc_now(),
-                )
-                if result.participant is None:
-                    raise web.HTTPForbidden(
-                        text=result.condition_check.user_message or "Условия участия не выполнены.",
-                    )
-                if result.created:
-                    result.participant.captcha_response_ms = captcha_response_ms(
-                        flow.captcha_sent_at if flow else None, utc_now(),
-                    )
-                    session.add(AuditLog(
-                        giveaway_id=giveaway.id, actor_user_id=uid,
-                        action="participant.frog_passed",
-                        payload={"seconds": round(now-game["started"], 2)},
-                    ))
-                if flow is not None:
-                    from tg_drop_bot.services.participation_worker import close_flow
-
-                    close_flow(flow)
-                if game.get('difficulty') == 'hard' and game.get('hard_key'):
-                    await record_hard_completion(
-                        session, giveaway.id, uid, game['hard_key'],
-                        round((game['checked']-game['started'])*1000),
-                        datetime.fromtimestamp(game['checked'], UTC),
-                    )
-                await session.commit()
-                if result.created:
-                    with contextlib.suppress(TelegramAPIError):
-                        await bot.send_message(uid, "Лягушка добралась! Ваше участие засчитано.")
-        return web.json_response(public_game(game, time.time()) | {
-            "token": token, "nonce": game['nonce'],
-        }, headers={
-            "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
-        })
+        except (RedisError, TimeoutError):
+            raise web.HTTPServiceUnavailable(
+                text="Сервис временно занят. Повторяем запрос."
+            ) from None
 
     async def cleanup(_app: web.Application) -> None:
         await redis.aclose()
