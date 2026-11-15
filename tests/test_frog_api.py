@@ -186,6 +186,7 @@ async def test_api_rejects_fake_success_wrong_owner_replays_and_records_real_fin
                         if failure == "expired":
                             flow.expires_at = utc_now()-timedelta(seconds=1)
                         elif failure == "replaced":
+                            assert flow.challenge_id is not None
                             flow.challenge_id += 100
                         elif failure == "finished":
                             giveaway = await s.get(Giveaway, gid)
