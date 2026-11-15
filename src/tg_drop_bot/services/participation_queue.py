@@ -219,6 +219,10 @@ async def lease_jobs_for_dispatch(
                     lane,
                     unfinished,
                     or_(
+                        ParticipationJob.available_at.is_(None),
+                        ParticipationJob.available_at <= now,
+                    ),
+                    or_(
                         ParticipationJob.dispatch_at.is_(None), ParticipationJob.dispatch_at <= now
                     ),
                     ~earlier_unprocessed_job(),

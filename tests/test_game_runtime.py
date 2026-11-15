@@ -356,3 +356,55 @@ def test_generator_is_shared_within_an_app_but_not_between_apps():
     first, second = web.Application(), web.Application()
     assert game_runtime.game_generator(first) is game_runtime.game_generator(first)
     assert game_runtime.game_generator(first) is not game_runtime.game_generator(second)
+
+
+@pytest.mark.parametrize("background_failure", [False, True])
+async def test_cancelled_request_keeps_cpu_slot_until_thread_really_finishes(
+    monkeypatch,
+    background_failure,
+):
+    generator = game_runtime.GameGenerator()
+    # Reserve one slot, so the outstanding construction owns the last CPU permit.
+    await generator.slots.acquire()
+    entered, release = threading.Event(), threading.Event()
+    counter_lock = threading.Lock()
+    calls = 0
+
+    def construct(*args, **kwargs):
+        nonlocal calls
+        with counter_lock:
+            calls += 1
+            number = calls
+        if number == 1:
+            entered.set()
+            release.wait(timeout=2)
+            if background_failure:
+                raise RuntimeError("cancelled construction failed")
+        return {}
+
+    monkeypatch.setattr(game_runtime, "new_game", construct)
+    first = asyncio.create_task(generator.generate({}, 1, "hard"))
+    second = None
+    try:
+        assert await asyncio.to_thread(entered.wait, 0.5)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        assert generator.slots.locked()
+        second = asyncio.create_task(generator.generate({}, 1, "easy"))
+        await asyncio.sleep(0.01)
+        assert calls == 1, "Cancelled HTTP request released a still-running CPU slot"
+        release.set()
+        result = await asyncio.wait_for(second, timeout=1)
+        assert calls == 2 and "started" in result
+        assert not generator.slots.locked()
+    finally:
+        release.set()
+        if not first.done():
+            first.cancel()
+        if second is not None and not second.done():
+            second.cancel()
+        await asyncio.gather(
+            first, *([second] if second is not None else []), return_exceptions=True
+        )
+        generator.slots.release()

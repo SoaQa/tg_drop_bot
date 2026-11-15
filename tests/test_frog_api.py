@@ -97,6 +97,7 @@ class MemoryRedis:
         (True, "replaced"),
         (True, "finished"),
         (True, "conditions"),
+        (True, "denied_reissue"),
         (False, "retry"),
         (True, "retry"),
         (True, "abandoned"),
@@ -311,7 +312,7 @@ async def test_api_rejects_fake_success_wrong_owner_replays_and_records_real_fin
             jumps = state["rows"] - 1
             for seq in range(jumps):
                 if (
-                    failure in ("expired", "replaced", "finished", "conditions")
+                    failure in ("expired", "replaced", "finished", "conditions", "denied_reissue")
                     and seq == jumps - 1
                 ):
                     async with sessions.begin() as s:
@@ -326,7 +327,7 @@ async def test_api_rejects_fake_success_wrong_owner_replays_and_records_real_fin
                             giveaway = await s.get(Giveaway, gid)
                             assert giveaway is not None
                             giveaway.status = "finished"
-                    if failure == "conditions":
+                    if failure in ("conditions", "denied_reissue"):
                         monkeypatch.setattr(
                             giveaways,
                             "check_participant_conditions",
@@ -479,7 +480,99 @@ async def test_api_rejects_fake_success_wrong_owner_replays_and_records_real_fin
                         assert attempt is not None and attempt.completed_at == finish_at
                     failure = None
                 if failure and seq == jumps - 1:
-                    assert r.status == (403 if failure == "conditions" else 409)
+                    assert r.status == (403 if failure in ("conditions", "denied_reissue") else 409)
+                    if failure == "denied_reissue":
+                        # A completed but permanently denied result remains cached in Redis.
+                        old_won = json.loads(memory.data["frog:session:" + token])
+                        assert old_won["status"] == "won"
+                        async with sessions.begin() as db:
+                            pending_denial = await db.scalar(
+                                select(ParticipationJob).where(
+                                    ParticipationJob.kind == "game_win",
+                                )
+                            )
+                            assert pending_denial is not None
+                            # The background worker becomes eligible after its initial delay.
+                            assert pending_denial.available_at is not None
+                            pending_denial.available_at = None
+                            denied_job = pending_denial.id
+                        await participation_worker.process_participation_job(
+                            sessions,
+                            bot,
+                            settings,
+                            denied_job,
+                        )
+                        async with sessions() as db:
+                            processed = await db.get(ParticipationJob, denied_job)
+                            flow = await db.scalar(select(ParticipationFlow))
+                            assert processed is not None and processed.processed_at is not None
+                            assert flow is not None and flow.status == "done"
+                        monkeypatch.setattr(
+                            giveaways,
+                            "check_participant_conditions",
+                            AsyncMock(
+                                return_value=ConditionCheck(ok=True, membership_status="member"),
+                            ),
+                        )
+                        # The user rejoins and receives a genuinely new challenge in the same draw.
+                        async with sessions.begin() as db:
+                            giveaway = await db.get(Giveaway, gid)
+                            assert giveaway is not None
+                            giveaway.intake_closed_at = None
+                            giveaway.deadline_at = utc_now() + timedelta(hours=1)
+                            assert (
+                                await admit_start(
+                                    db,
+                                    giveaway_id=gid,
+                                    user=User(id=123, is_bot=False, first_name="Тест"),
+                                    update_id=100,
+                                    received_at=utc_now(),
+                                    allow_new=AsyncMock(return_value=True),
+                                )
+                                == "accepted"
+                            )
+                            new_job = await db.scalar(
+                                select(ParticipationJob.id).where(
+                                    ParticipationJob.update_id == 100,
+                                )
+                            )
+                            assert new_job is not None
+                        await participation_worker.process_participation_job(
+                            sessions,
+                            bot,
+                            settings,
+                            new_job,
+                        )
+                        async with sessions() as db:
+                            flow = await db.scalar(select(ParticipationFlow))
+                            assert flow is not None and flow.status == "game"
+                            assert flow.challenge_id != old_won["challenge_id"]
+                        assert json.loads(memory.data["frog:session:" + token])["status"] == "won"
+                        new_attempt = await post("start", giveaway=gid, difficulty="hard")
+                        assert new_attempt.status == 200, await new_attempt.text()
+                        next_game = await new_attempt.json()
+                        assert next_game["status"] == "playing"
+                        assert next_game["difficulty"] == "easy"
+                        assert next_game["token"] != token
+                        assert all("laser" not in lane for lane in next_game["lanes"])
+                        assert (
+                            await post(
+                                "move",
+                                token=token,
+                                seq=old_won["seq"],
+                                nonce=old_won["nonce"],
+                                direction="wait",
+                            )
+                        ).status == 400
+                        async with sessions() as db:
+                            assert (
+                                await db.scalar(
+                                    select(func.count()).select_from(HardGameAttempt),
+                                )
+                                == 1
+                            )
+                            attempt = await db.get(HardGameAttempt, (gid, 123))
+                            assert attempt is not None and attempt.completed_at is None
                     async with sessions() as s:
                         assert await s.scalar(select(func.count()).select_from(Participant)) == 0
                     return

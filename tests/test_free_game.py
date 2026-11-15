@@ -120,6 +120,7 @@ async def test_free_game_needs_no_database_and_erases_finished_state(monkeypatch
         # A lost final response can be retried without keeping an active game session.
         retried = await post("move", **accepted)
         assert retried.status == 200 and await retried.json() == state
+        assert (await post("move", **(accepted | {"seq": float(accepted["seq"])}))).status == 400
         assert key not in store.data
         assert not any(k.startswith("freefrog:current:") for k in store.data)
         assert (

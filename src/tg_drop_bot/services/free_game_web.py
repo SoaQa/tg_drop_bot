@@ -91,6 +91,12 @@ def register_free_game_routes(app: web.Application, settings: Settings) -> None:
             token = data["token"]
             if not isinstance(token, str) or len(token) > 100:
                 raise ValueError("invalid token")
+            if (
+                not isinstance(data.get("nonce"), str)
+                or type(data.get("seq")) is not int
+                or data.get("direction") not in ("up", "wait")
+            ):
+                raise ValueError("invalid command")
             current_token, raw, receipt = await redis.mget(
                 current,
                 f"freefrog:session:{token}",

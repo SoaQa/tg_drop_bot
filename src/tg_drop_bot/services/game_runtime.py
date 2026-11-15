@@ -95,14 +95,24 @@ class GameGenerator:
                 text="Сервер занят. Повторите через секунду.",
                 headers={"Retry-After": "1"},
             ) from None
-        try:
-            game = await asyncio.to_thread(new_game, user, gid, 0, difficulty=difficulty)
-            # Queueing/generation time must not consume the player's time or move traffic.
-            started = time.time()
-            game.update(started=started, checked=started, last_move=started - 1)
-            return game
-        finally:
+        # Cancelling an awaiting request cannot stop an already running CPU thread.
+        # Retain its slot until the actual construction task has completed.
+        construction = asyncio.create_task(
+            asyncio.to_thread(new_game, user, gid, 0, difficulty=difficulty)
+        )
+
+        def completed(task: asyncio.Task[dict]) -> None:
             self.slots.release()
+            if not task.cancelled():
+                # Retrieve a failure even when the original request was cancelled.
+                task.exception()
+
+        construction.add_done_callback(completed)
+        game = await asyncio.shield(construction)
+        # Queueing/generation time must not consume the player's time or move traffic.
+        started = time.time()
+        game.update(started=started, checked=started, last_move=started - 1)
+        return game
 
 
 GENERATOR = web.AppKey("game_generator", GameGenerator)

@@ -9,7 +9,7 @@ from datetime import timedelta
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import BufferedInputFile, User
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tg_drop_bot.bot.keyboards import captcha_keyboard
@@ -189,6 +189,10 @@ async def process_participation_job(
             .where(
                 ParticipationJob.id == job_id,
                 ParticipationJob.processed_at.is_(None),
+                or_(
+                    ParticipationJob.available_at.is_(None),
+                    ParticipationJob.available_at <= utc_now(),
+                ),
                 ~earlier_unprocessed_job(),
             )
             .with_for_update(skip_locked=True)
@@ -232,6 +236,10 @@ async def process_participation_job(
                 ParticipationJob.id == job_id,
                 ParticipationJob.reply_text.is_not(None),
                 ParticipationJob.processed_at.is_not(None),
+                or_(
+                    ParticipationJob.available_at.is_(None),
+                    ParticipationJob.available_at <= utc_now(),
+                ),
             )
             .with_for_update(skip_locked=True)
         )
@@ -253,4 +261,5 @@ async def defer_participation_job(
         if job is not None and (job.processed_at is None or job.reply_text is not None):
             job.failures += 1
             retry_delay = max(delay, min(2 ** min(job.failures, 6), 60))
-            job.dispatch_at = utc_now() + timedelta(seconds=retry_delay)
+            job.available_at = utc_now() + timedelta(seconds=retry_delay)
+            job.dispatch_at = None

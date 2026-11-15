@@ -223,6 +223,8 @@ class ParticipationJob(Base):
     flow_id: Mapped[int] = mapped_column(ForeignKey("participation_flows.id", ondelete="CASCADE"))
     kind: Mapped[str] = mapped_column(String(16))
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    available_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # dispatch_at is only an active lease; retry delays belong in available_at.
     dispatch_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     answer_hash: Mapped[str | None] = mapped_column(String(64))

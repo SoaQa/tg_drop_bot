@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from tg_drop_bot.config import Settings
 from tg_drop_bot.db.models import ParticipationJob
 from tg_drop_bot.db.session import create_session_factory
+from tg_drop_bot.services.dates import utc_now
 from tg_drop_bot.services.participation_limits import ParticipationLimits
 from tg_drop_bot.services.participation_queue import lease_jobs_for_dispatch
 from tg_drop_bot.services.participation_worker import (
@@ -107,13 +108,16 @@ def publish_jobs(starts: list[int], priority: list[int]) -> None:
 
 
 async def next_dispatch_batch(session: AsyncSession) -> tuple[list[int], list[int]]:
+    now = utc_now()
     unfinished = (
         select(ParticipationJob.id)
         .where(
             or_(
                 ParticipationJob.processed_at.is_(None),
                 ParticipationJob.reply_text.is_not(None),
-            )
+            ),
+            or_(ParticipationJob.available_at.is_(None), ParticipationJob.available_at <= now),
+            or_(ParticipationJob.dispatch_at.is_(None), ParticipationJob.dispatch_at <= now),
         )
         .exists()
     )

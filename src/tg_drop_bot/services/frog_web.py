@@ -181,7 +181,7 @@ def register_game_routes(
                         kind="game_win",
                         received_at=datetime.fromtimestamp(game["checked"], UTC),
                         challenge_id=game["audit_id"],
-                        dispatch_at=utc_now() + timedelta(seconds=15),
+                        available_at=utc_now() + timedelta(seconds=15),
                     )
                 )
             await session.execute(
@@ -307,6 +307,7 @@ def register_game_routes(
             if job is not None:
                 job.processed_at = utc_now()
                 job.reply_text = "Лягушка добралась! Ваше участие засчитано." if created else None
+                job.available_at = None
                 job.dispatch_at = utc_now()
         game["finalized"] = True
         if created and not settings.participation_queue_enabled:
@@ -322,6 +323,29 @@ def register_game_routes(
             token = await redis.get(f"frog:current:{uid}")
             raw = await redis.get(f"frog:session:{token}") if token else None
             previous = json.loads(raw) if raw else None
+            if (
+                settings.participation_queue_enabled
+                and previous
+                and previous.get("giveaway_id") == gid
+                and previous.get("user", {}).get("id") == uid
+                and previous.get("status") == "won"
+            ):
+                async with sessions() as session:
+                    challenge_id = await session.scalar(
+                        select(ParticipationFlow.challenge_id).where(
+                            ParticipationFlow.giveaway_id == gid,
+                            ParticipationFlow.user_id == uid,
+                        )
+                    )
+                    if challenge_id != previous.get("challenge_id") and not await session.scalar(
+                        select(Participant.id).where(
+                            Participant.giveaway_id == gid,
+                            Participant.user_id == uid,
+                        )
+                    ):
+                        # A processed refusal can be followed by a new bot challenge.
+                        # Only an unfinished result for the current challenge may resume.
+                        previous = None
             if not (
                 previous and previous.get("giveaway_id") == gid and previous.get("status") == "won"
             ):
@@ -338,8 +362,11 @@ def register_game_routes(
                             ParticipationJob.processed_at.is_(None),
                             ParticipationFlow.user_id == uid,
                             ParticipationFlow.giveaway_id == gid,
+                            ParticipationFlow.status == "game",
                             AuditLog.actor_user_id == uid,
                             AuditLog.giveaway_id == gid,
+                            AuditLog.payload["game_result"]["challenge_id"].as_integer()
+                            == ParticipationFlow.challenge_id,
                         )
                         .limit(1)
                     )
