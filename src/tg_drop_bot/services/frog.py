@@ -60,7 +60,9 @@ def collision(game: dict, x: int, y: int, at: float) -> bool:
     return False
 
 
-def advance(game: dict, direction: str, seq: int, now: float) -> dict:
+def advance(
+    game: dict, direction: str, seq: int, now: float, *, record_moves: bool = True,
+) -> dict:
     if game["status"] != "playing":
         return game
     if type(seq) is not int or seq != game["seq"]:
@@ -86,10 +88,11 @@ def advance(game: dict, direction: str, seq: int, now: float) -> dict:
     finish = game.get("rows", 8) - 1
     game["y"] = min(finish, game["y"] + 1)
     game["last_move"] = now
-    game["moves"].append({
-        "t": round(now - game["started"], 3), "direction": direction,
-        "x": game["x"], "y": game["y"],
-    })
+    if record_moves:
+        game["moves"].append({
+            "t": round(now - game["started"], 3), "direction": direction,
+            "x": game["x"], "y": game["y"],
+        })
     if collision(game, game["x"], game["y"], now):
         game["status"] = "lost"
     elif game["y"] == finish:

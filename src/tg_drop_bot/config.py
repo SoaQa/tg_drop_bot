@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     app_timezone: str = Field(default="Europe/Moscow", alias="APP_TIMEZONE")
     app_secret_key: str = Field(default="dev-change-me", alias="APP_SECRET_KEY")
     frog_game_enabled: bool = Field(default=False, alias="FROG_GAME_ENABLED")
+    free_game_enabled: bool = Field(default=False, alias="FREE_GAME_ENABLED")
 
     telegram_mode: Literal["polling", "webhook"] = Field(default="polling", alias="TELEGRAM_MODE")
     webhook_url: str = Field(default="", alias="WEBHOOK_URL")
@@ -67,6 +68,11 @@ class Settings(BaseSettings):
         return f"{self.webhook_url.rstrip('/')}{self.webhook_path}"
 
     def validate_runtime(self) -> None:
+        if self.free_game_enabled and (
+            self.telegram_mode != "webhook" or not self.redis_url
+            or self.app_secret_key == "dev-change-me"
+        ):
+            raise RuntimeError("Free game requires webhook, Redis and a private secret")
         if self.frog_game_enabled and (
             self.telegram_mode != "webhook" or self.participation_queue_enabled
             or not self.redis_url

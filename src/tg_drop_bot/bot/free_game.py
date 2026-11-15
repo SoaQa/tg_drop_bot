@@ -1,0 +1,24 @@
+from aiogram import Bot, F, Router
+from aiogram.filters import Command, CommandStart
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, WebAppInfo
+
+from tg_drop_bot.config import Settings
+
+router = Router(name="free_game")
+
+
+@router.message(Command("game"))
+@router.message(CommandStart(deep_link=True, magic=F.args == "game"))
+async def open_free_game(message: Message, settings: Settings, bot: Bot) -> None:
+    if message.chat.type == "private":
+        button = InlineKeyboardButton(
+            text="Играть", web_app=WebAppInfo(url=f"{settings.webhook_url}/play/"),
+        )
+    else:
+        me = await bot.get_me()
+        button = InlineKeyboardButton(text="Играть", url=f"https://t.me/{me.username}?start=game")
+    await message.answer(
+        "Помогите лягушке перейти дорогу! Тап или клик делает прыжок вперёд. "
+        "Можно играть сколько угодно, это отдельная мини-игра.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[button]]),
+    )

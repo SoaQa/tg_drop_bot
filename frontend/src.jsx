@@ -3,13 +3,14 @@ import {createRoot} from 'react-dom/client';
 import {drawWind} from './wind.mjs';
 
 const tg=window.Telegram?.WebApp;
+const freeMode=location.pathname.startsWith('/play/');
 tg?.ready(); tg?.expand(); tg?.disableVerticalSwipes?.();
 function App(){
  const [game,setGame]=useState(null),[message,setMessage]=useState('Доведите лягушку до верхнего берега.'),[busy,setBusy]=useState(false);
  const current=useRef(null),pending=useRef(false),canvas=useRef(null),sync=useRef(0),queuedTap=useRef(false);
  const gid=new URLSearchParams(location.search).get('giveaway');
  async function call(action,extra){
-  const r=await fetch('/test/api/game/'+action,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({initData:tg?.initData||'',...extra})});
+  const r=await fetch((freeMode?'/play/api/':'/test/api/game/')+action,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({initData:tg?.initData||'',...extra})});
   if(!r.ok) throw new Error(await r.text());
   return r.json();
  }
@@ -24,7 +25,7 @@ function App(){
   if(pending.current){if(direction==='up')queuedTap.current=true;return;}
   pending.current=true;
   try{const n=await call('move',{token:g.token,nonce:g.nonce,seq:g.seq,direction});accept(n);
-   if(n.status==='won')setMessage('Получилось! Ваше участие засчитано. Можно вернуться в бот.');
+   if(n.status==='won')setMessage(freeMode?'Получилось! Лягушка добралась. Сыграем ещё?':'Получилось! Ваше участие засчитано. Можно вернуться в бот.');
    if(n.status==='lost')setMessage('Лягушка попала под колёса. Попробуйте ещё!');
    if(n.status==='expired')setMessage('Время игры истекло. Начните ещё раз.');
   }catch(e){setMessage(e.message);current.current=null;setGame(null);}finally{pending.current=false;
@@ -75,6 +76,6 @@ function App(){
   };draw();return()=>cancelAnimationFrame(frame);
  },[]);
  const playing=game?.status==='playing';
- return <main><div className="badge">ТЕСТОВЫЙ РОЗЫГРЫШ · GIGAIDE</div><h1>Лягушка на дороге</h1><p className="intro">Один тап или клик: один прыжок вперёд.</p><div className="board" style={{aspectRatio:`7/${game?.rows??8}`,maxWidth:`calc((var(--app-height,100dvh) - 218px)*${7/(game?.rows??8)})`}}><canvas ref={canvas} width="420" height="480" tabIndex="0" role="button" aria-label="Прыгнуть вперёд"/></div><p className="status" role="status">{message}</p>{!playing?<button className="start" disabled={busy||!tg?.initData} onClick={start}>{busy?'Загрузка...':game?.status==='won'?'Сыграть ещё':'Начать игру'}</button>:<div className="tap-hint">Берегитесь машин и газонокосилки на траве</div>}{!tg?.initData&&<p className="external">Откройте игру кнопкой в @bobot1922_bot.</p>}<small>На компьютере также работает пробел.</small></main>;
+ return <main><div className="badge">{freeMode?'ЛЯГУШКА · МИНИ-ИГРА':'ТЕСТОВЫЙ РОЗЫГРЫШ · GIGAIDE'}</div><h1>Лягушка на дороге</h1><p className="intro">Один тап или клик: один прыжок вперёд.</p><div className="board" style={{aspectRatio:`7/${game?.rows??8}`,maxWidth:`calc((var(--app-height,100dvh) - 218px)*${7/(game?.rows??8)})`}}><canvas ref={canvas} width="420" height="480" tabIndex="0" role="button" aria-label="Прыгнуть вперёд"/></div><p className="status" role="status">{message}</p>{!playing?<button className="start" disabled={busy||!tg?.initData} onClick={start}>{busy?'Загрузка...':game?.status==='won'?'Сыграть ещё':'Начать игру'}</button>:<div className="tap-hint">Берегитесь машин и газонокосилки на траве</div>}{!tg?.initData&&<p className="external">{freeMode?'Откройте игру командой /game в боте.':'Откройте игру кнопкой в @bobot1922_bot.'}</p>}<small>На компьютере также работает пробел.</small></main>;
 }
 createRoot(document.getElementById('root')).render(<App/>);

@@ -43,6 +43,10 @@ async def run_bot() -> None:
     dispatcher.callback_query.middleware(RateLimitMiddleware())
     dispatcher.update.middleware(DbSessionMiddleware())
     dispatcher.include_router(channel.router)
+    if settings.free_game_enabled:
+        from tg_drop_bot.bot.free_game import router as free_game_router
+
+        dispatcher.include_router(free_game_router)
     dispatcher.include_router(participant.router)
     dispatcher.include_router(admin.router)
 
@@ -66,6 +70,10 @@ async def run_bot() -> None:
         return
 
     app = web.Application()
+    if settings.free_game_enabled:
+        from tg_drop_bot.services.free_game_web import register_free_game_routes
+
+        register_free_game_routes(app, settings)
     if settings.frog_game_enabled:
         from tg_drop_bot.services.frog_web import register_game_routes
 
