@@ -12,6 +12,31 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+async def test_giveaway_description_entities_survive_database_roundtrip() -> None:
+    from aiogram.types import MessageEntity
+
+    from tg_drop_bot.db.models import Giveaway
+    from tg_drop_bot.services.post_formatting import render_description
+
+    engine = create_async_engine(os.environ["TEST_DATABASE_URL"])
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with sessions() as session:
+            giveaway = Giveaway(
+                creator_user_id=1, title="Тест", post_text="Ссылка",
+                post_text_entities=[MessageEntity(
+                    type="text_link", offset=0, length=6, url="https://example.com"
+                ).model_dump(mode="json", exclude_none=True)],
+            )
+            session.add(giveaway)
+            await session.flush()
+            await session.refresh(giveaway)
+            assert render_description(giveaway) == '<a href="https://example.com">Ссылка</a>'
+            await session.rollback()
+    finally:
+        await engine.dispose()
+
+
 @pytest.mark.asyncio
 async def test_postgres_schema_accepts_known_channel() -> None:
     engine = create_async_engine(os.environ["TEST_DATABASE_URL"])

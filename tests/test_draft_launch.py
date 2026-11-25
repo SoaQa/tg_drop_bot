@@ -12,6 +12,7 @@ from tg_drop_bot.config import Settings
 from tg_drop_bot.db.models import Giveaway, KnownChannel
 from tg_drop_bot.services.dates import utc_now
 from tg_drop_bot.services.giveaways import PHOTO_CAPTION_LIMIT, giveaway_post_length_error
+from tg_drop_bot.services.post_formatting import telegram_text_length
 from tg_drop_bot.services.rendering import render_giveaway_post
 
 
@@ -104,7 +105,7 @@ def test_photo_caption_reserves_room_for_participant_count_and_deadline(draft) -
     settings = Settings()
     draft.image_file_id = "photo-id"
     draft.post_text = "а"
-    size = len(render_giveaway_post(draft, settings, participants_count=2**63 - 1))
+    size = telegram_text_length(render_giveaway_post(draft, settings, participants_count=2**63 - 1))
     draft.post_text += "а" * (PHOTO_CAPTION_LIMIT - size)
     assert giveaway_post_length_error(draft, settings) is None
     deadline = draft.deadline_at
@@ -112,7 +113,9 @@ def test_photo_caption_reserves_room_for_participant_count_and_deadline(draft) -
     assert giveaway_post_length_error(draft, settings) is None
     draft.deadline_at = deadline
     draft.post_text += "а"
-    assert len(render_giveaway_post(draft, settings, participants_count=0)) < PHOTO_CAPTION_LIMIT
+    assert telegram_text_length(
+        render_giveaway_post(draft, settings, participants_count=0)
+    ) < PHOTO_CAPTION_LIMIT
     assert giveaway_post_length_error(draft, settings)
     draft.deadline_at = None
     assert giveaway_post_length_error(draft, settings)

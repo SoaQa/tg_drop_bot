@@ -53,6 +53,7 @@ from tg_drop_bot.services.giveaways import (
     validate_draft,
 )
 from tg_drop_bot.services.participation_queue import lock_giveaway_intake
+from tg_drop_bot.services.post_formatting import description_from_message
 from tg_drop_bot.services.rendering import (
     channel_post_link,
     render_giveaway_card,
@@ -154,10 +155,12 @@ async def draft_post_text(
 ) -> None:
     data = await state.get_data()
     giveaway = await get_giveaway(session, data["giveaway_id"])
-    if giveaway is None or not message.text:
+    text, entities = description_from_message(message)
+    if giveaway is None or not text.strip():
         await message.answer("Введите описание сообщением.")
         return
-    giveaway.post_text = message.text.strip()
+    giveaway.post_text = text
+    giveaway.post_text_entities = entities
     if error := giveaway_post_length_error(giveaway, settings):
         await session.rollback()
         await message.answer(error)
@@ -670,12 +673,20 @@ async def update_text_field(
             reply_markup=admin_main_keyboard(),
         )
         return
-    value = value.strip()
+    if field == "post_text":
+        value, entities = description_from_message(message)
+        if not value.strip():
+            await message.answer("Введите описание сообщением.")
+            return
+    else:
+        value = value.strip()
     if field == "title" and len(value) > GIVEAWAY_TITLE_LIMIT:
         await message.answer(f"Название не может быть длиннее {GIVEAWAY_TITLE_LIMIT} символов.")
         return
     participants_count = await count_participants(session, giveaway.id)
     setattr(giveaway, field, value)
+    if field == "post_text":
+        giveaway.post_text_entities = entities
     if error := giveaway_post_length_error(
         giveaway, settings, participants_count=participants_count
     ):

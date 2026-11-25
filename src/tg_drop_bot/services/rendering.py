@@ -5,6 +5,7 @@ import html
 from tg_drop_bot.config import Settings
 from tg_drop_bot.db.models import Giveaway, KnownChannel, Participant
 from tg_drop_bot.services.dates import format_admin_datetime
+from tg_drop_bot.services.post_formatting import render_description
 
 # Больше победителей в одном сообщении не показываем, чтобы не упереться
 # в лимит Telegram на 4096 символов.
@@ -58,8 +59,10 @@ def render_giveaway_post(
     parts = [
         f"<b>{'Розыгрыш завершен: ' if closed else ''}{html.escape(title)}</b>",
     ]
-    if giveaway.post_text and giveaway.post_text.strip() != title.strip():
-        parts.append(html.escape(giveaway.post_text))
+    if giveaway.post_text and (
+        giveaway.post_text.strip() != title.strip() or giveaway.post_text_entities
+    ):
+        parts.append(render_description(giveaway))
     if giveaway.terms_text:
         parts.extend(["", "<b>Условия участия</b>", html.escape(giveaway.terms_text)])
     if participants_count is not None:
@@ -93,7 +96,7 @@ def render_giveaway_card(giveaway: Giveaway, settings: Settings, participants_co
             f"Название: {html.escape(giveaway_title(giveaway))}",
             f"Статус: <b>{html.escape(status)}</b>",
             f"Канал: {html.escape(channel_name)}",
-            f"Описание: {html.escape(giveaway.post_text or 'не задано')}",
+            f"Описание: {render_description(giveaway) if giveaway.post_text else 'не задано'}",
             f"Дедлайн: {format_admin_datetime(giveaway.deadline_at, settings.timezone)}",
             f"Участников: {participants_count}",
             f"Победителей: {giveaway.winners_count or 0}",

@@ -32,6 +32,7 @@ from tg_drop_bot.services.participation_queue import (
     giveaway_has_pending_intake,
     lock_giveaway_intake,
 )
+from tg_drop_bot.services.post_formatting import telegram_text_length
 from tg_drop_bot.services.rendering import (
     channel_post_link,
     giveaway_title,
@@ -268,7 +269,7 @@ def giveaway_post_length_error(
     # PostgreSQL COUNT returns bigint; leave room for all of its decimal digits.
     count = 2**63 - 1 if has_photo else participants_count
     text = render_giveaway_post(giveaway, settings, participants_count=count)
-    length = len(text)
+    length = telegram_text_length(text)
     if has_photo:
         if giveaway.deadline_at is None:
             length += len("00.00.0000 00:00") - len("не задано")

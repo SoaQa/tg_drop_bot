@@ -58,6 +58,7 @@ class Giveaway(Base, TimestampMixin):
     channel_id: Mapped[int | None] = mapped_column(ForeignKey("known_channels.id"), nullable=True)
     title: Mapped[str | None] = mapped_column(String(255), nullable=True)
     post_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    post_text_entities: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB, nullable=True)
     terms_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     image_file_id: Mapped[str | None] = mapped_column(String(512), nullable=True)
     winners_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
