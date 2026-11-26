@@ -295,6 +295,19 @@ async def test_waiting_for_hop_cannot_extend_the_free_game_deadline(monkeypatch)
     assert sleeps and game["status"] == "expired" and game["y"] == 4
 
 
+async def test_retry_keeps_confirmed_finish_past_deadline(monkeypatch):
+    game, clock, _ = timed_hop_fixture(monkeypatch)
+    game["y"] = game["rows"] - 2
+    final = {"nonce": game["nonce"], "seq": game["seq"], "direction": "up"}
+    deadline = clock[0] + 1
+    await game_runtime.execute_command(game, final, deadline=deadline)
+    assert game["status"] == "won"
+    recorded_time = game["checked"]
+    clock[0] += 2
+    await game_runtime.execute_command(game, final, deadline=deadline)
+    assert game["status"] == "won" and game["checked"] == recorded_time
+
+
 def test_exact_last_command_retry_returns_current_state_without_advancing(monkeypatch):
     game, calls = command_fixture(monkeypatch)
     request = {"nonce": "original-nonce", "seq": 0, "direction": "up"}

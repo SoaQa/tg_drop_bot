@@ -268,7 +268,7 @@ async def test_api_rejects_fake_success_wrong_owner_replays_and_records_real_fin
                 assert 'name="frog-mode-selection" content="enabled"' in html
                 if failure == "mode_reopen":
                     await check_reopened_game(
-                        client, sessions, settings, bot, memory, clock, gid, init,
+                        client, sessions, settings, bot, memory, clock, gid, init, monkeypatch,
                     )
                     return
                 await check_mode_selection(
@@ -892,8 +892,12 @@ async def check_mode_selection(client, sessions, settings, bot, memory, clock, g
             await socket.close()
 
 
-async def check_reopened_game(client, sessions, settings, bot, memory, clock, gid, init) -> None:
+async def check_reopened_game(
+    client, sessions, settings, bot, memory, clock, gid, init, monkeypatch,
+) -> None:
     import json
+
+    from redis.exceptions import ConnectionError as RedisConnectionError
 
     from tg_drop_bot.services.hard_game import claim_hard_attempt, record_hard_completion
     from tg_drop_bot.services.participation_queue import admit_start
@@ -918,6 +922,22 @@ async def check_reopened_game(client, sessions, settings, bot, memory, clock, gi
     await process_participation_job(sessions, bot, settings, job)
     keyboard = bot.send_message.call_args.kwargs["reply_markup"]
     assert f"/game/?giveaway={gid}&ranking=1" in keyboard.inline_keyboard[0][0].web_app.url
+
+    store = frog_web.store_game
+
+    async def write_then_disconnect(*args):
+        await store(*args)
+        raise RedisConnectionError("lost the reply after the Redis write")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(frog_web, "store_game", write_then_disconnect)
+        async with client.post("/game/api/start", json={
+            "initData": init, "clientVersion": __version__, "giveaway": gid, "difficulty": "hard",
+        }) as failed:
+            assert failed.status == 503
+    async with sessions() as db:
+        attempt = await db.get(HardGameAttempt, (gid, 123))
+        assert attempt is not None and not attempt.transition_budget_applied
 
     async with client.ws_connect("/game/live", headers={"Origin": settings.webhook_url}) as ws:
         await ws.send_json({"action": "hello", "clientVersion": __version__, "initData": init})

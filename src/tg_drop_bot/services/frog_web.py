@@ -386,6 +386,7 @@ def register_game_routes(
     ) -> dict:
         uid = user["id"]
         live = connection is not None
+        persisted_start = False
         if action in ("start", "resume"):
             if action == "resume" and not live:
                 raise web.HTTPNotFound()
@@ -402,6 +403,18 @@ def register_game_routes(
             previous = json.loads(raw) if raw else None
             if previous and previous.get("user", {}).get("id") != uid:
                 raise ValueError("wrong owner")
+            if (
+                previous and previous.get("validate_start_audit")
+                and previous["status"] == "playing"
+            ):
+                async with sessions() as session:
+                    issued_audit = await session.scalar(select(AuditLog.id).where(
+                        AuditLog.id == previous["audit_id"], AuditLog.actor_user_id == uid,
+                        AuditLog.giveaway_id == previous["giveaway_id"],
+                        AuditLog.action == "frog.run.started",
+                    ))
+                if issued_audit is None:
+                    previous = None
             if (
                 settings.participation_queue_enabled
                 and previous
@@ -581,13 +594,6 @@ def register_game_routes(
                         raise web.HTTPConflict(text="Ваше участие уже засчитано.")
                     if choose_mode:
                         hard = requested == "hard"
-                        if hard:
-                            result = await claim_hard_game_slot(
-                                session, gid, uid, hard_key, reopening=reopening,
-                            )
-                            if result is None:
-                                raise web.HTTPConflict(text="Сложные попытки закончились.")
-                            hard_left = result
                     else:
                         hard = await claim_hard_attempt(session, gid, uid, hard_key)
                 if hard != (game["difficulty"] == "hard"):
@@ -608,7 +614,15 @@ def register_game_routes(
                     game.update(live=True, connection=connection)
                 if choose_mode:
                     game.update(hard_attempts_left=hard_left, ranking_only=ranking_only)
+                token = secrets.token_urlsafe(32)
                 async with sessions.begin() as session:
+                    if choose_mode and hard:
+                        result = await claim_hard_game_slot(
+                            session, gid, uid, hard_key, reopening=reopening,
+                        )
+                        if result is None:
+                            raise web.HTTPConflict(text="Сложные попытки закончились.")
+                        game.update(hard_attempts_left=result, validate_start_audit=True)
                     if switching and previous is not None:
                         abandoned = previous | {"status": "abandoned"}
                         await session.execute(update(AuditLog).where(
@@ -627,7 +641,10 @@ def register_game_routes(
                     session.add(record)
                     await session.flush()
                     game["audit_id"] = record.id
-                token = secrets.token_urlsafe(32)
+                    if choose_mode and hard:
+                        # A Redis failure rolls back both the audit and the charged attempt.
+                        await persist(game, token)
+                        persisted_start = True
         elif action in ("move", "sync"):
             if action == "sync" and not live:
                 raise web.HTTPNotFound()
@@ -656,7 +673,8 @@ def register_game_routes(
             raise web.HTTPNotFound()
         if live:
             game["connection"] = connection
-        await persist(game, token)
+        if not persisted_start:
+            await persist(game, token)
         if game["status"] != "playing":
             await prepare_result(game)
             await persist(game, token)

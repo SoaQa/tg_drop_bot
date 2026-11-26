@@ -97,7 +97,7 @@ async def execute_command(
                 # A small timer margin also avoids floating point boundary drops.
                 await asyncio.sleep(delay + 0.001)
     now = time.time()
-    if deadline is not None and now >= deadline:
+    if deadline is not None and now >= deadline and game["status"] == "playing":
         game["status"] = "expired"
     return command(game, data, now, record_moves=record_moves)
 
