@@ -107,6 +107,7 @@ class MemoryRedis:
         (True, "transient_restore"),
         (True, "transient_condition"),
         (True, "transient_worker"),
+        (True, "live"),
     ],
 )
 async def test_api_rejects_fake_success_wrong_owner_replays_and_records_real_finish(
@@ -147,6 +148,7 @@ async def test_api_rejects_fake_success_wrong_owner_replays_and_records_real_fin
     settings = Settings(
         BOT_TOKEN=TOKEN,
         FROG_GAME_ENABLED=True,
+        FROG_LIVE_TRANSPORT_ENABLED=failure == "live",
         PARTICIPATION_QUEUE_ENABLED=queued,
         WEBHOOK_URL="https://example.test",
     )
@@ -256,6 +258,11 @@ async def test_api_rejects_fake_success_wrong_owner_replays_and_records_real_fin
                         },
                     )
                 ).status == 409
+            if failure == "live":
+                await check_live_game(
+                    client, sessions, settings, bot, memory, clock, gid, init, monkeypatch
+                )
+                return
             r = await post("start", giveaway=gid)
             assert r.status == 200
             state = await r.json()
@@ -664,3 +671,91 @@ async def test_api_rejects_fake_success_wrong_owner_replays_and_records_real_fin
         async with engine.begin() as c:
             await c.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
         await engine.dispose()
+
+
+async def check_live_game(
+    client, sessions, settings, bot, memory, clock, gid, init, monkeypatch
+) -> None:
+    import json
+
+    from aiohttp import WSServerHandshakeError
+
+    from tg_drop_bot.services import giveaways, participation_worker
+    from tg_drop_bot.services.conditions import ConditionCheck
+
+    url = "/game/live"
+    headers = {"Origin": settings.webhook_url}
+    with pytest.raises(WSServerHandshakeError) as error:
+        await client.ws_connect(url, headers={"Origin": "https://other.example"})
+    assert error.value.status == 403
+
+    async def connect():
+        socket = await client.ws_connect(url, headers=headers)
+        await socket.send_json({"action": "hello", "clientVersion": __version__, "initData": init})
+        assert (await socket.receive_json(timeout=3))["type"] == "ready"
+        return socket
+
+    async def command(socket, action, **args):
+        await socket.send_json({"action": action, **args})
+        response = await socket.receive_json(timeout=5)
+        assert response["type"] == "state", response
+        return response["state"]
+
+    socket = await connect()
+    state = await command(socket, "start", giveaway=gid)
+    assert state["difficulty"] == "hard"
+    assert "nonce" not in state and "token" not in state
+    token = memory.data["frog:current:123"]
+    key = "frog:session:" + token
+    game = json.loads(memory.data[key])
+    # Use a deterministic lane-free fixture in the local test only.
+    game.update(lanes=[], rows=4)
+    memory.data[key] = json.dumps(game)
+    clock[0] += 0.4
+    first = await command(socket, "move", seq=0)
+    assert first["seq"] == 1 and first["y"] == 1
+    assert (await command(socket, "move", seq=0))["y"] == 1
+    assert (await command(socket, "sync"))["seq"] == 1
+
+    resumed = await connect()
+    snapshot = await command(resumed, "resume", giveaway=gid)
+    assert snapshot["difficulty"] == "hard" and snapshot["y"] == 1
+    assert memory.data["frog:current:123"] == token
+    await socket.send_json({"action": "move", "seq": 1})
+    assert (await socket.receive_json(timeout=3))["status"] == 409
+    await socket.close()
+
+    clock[0] += 0.4
+    assert (await command(resumed, "move", seq=1))["y"] == 2
+    clock[0] += 0.4
+    bot.get_chat_member.side_effect = AssertionError("WebSocket must not wait for Telegram")
+    won = await command(resumed, "move", seq=2)
+    assert won["status"] == "won" and won["registration"] == "pending"
+    assert (await command(resumed, "move", seq=2))["registration"] == "pending"
+    assert (await command(resumed, "sync"))["registration"] == "pending"
+    async with sessions() as s:
+        jobs = (await s.scalars(select(ParticipationJob).where(
+            ParticipationJob.kind == "game_win"
+        ))).all()
+        assert len(jobs) == 1 and jobs[0].available_at is None
+        outbox = jobs[0].id
+        assert await s.scalar(select(func.count()).select_from(Participant)) == 0
+    check = AsyncMock(return_value=ConditionCheck(ok=False, membership_status="check_failed"))
+    monkeypatch.setattr(giveaways, "check_participant_conditions", check)
+    with pytest.raises(participation_worker.RetryParticipation):
+        await participation_worker.process_participation_job(sessions, bot, settings, outbox)
+    assert (await command(resumed, "sync"))["registration"] == "pending"
+    await resumed.close()
+    memory.data.pop("frog:current:123")
+    memory.data.pop(key)
+    resumed = await connect()
+    assert (await command(resumed, "resume", giveaway=gid))["registration"] == "pending"
+    check.return_value = ConditionCheck(ok=True, membership_status="member")
+    await participation_worker.process_participation_job(sessions, bot, settings, outbox)
+    await participation_worker.process_participation_job(sessions, bot, settings, outbox)
+    assert (await command(resumed, "sync"))["registration"] == "registered"
+    async with sessions() as s:
+        assert await s.scalar(select(func.count()).select_from(Participant)) == 1
+        claim = await s.get(HardGameAttempt, (gid, 123))
+        assert claim is not None and claim.completed_at is not None
+    await resumed.close()

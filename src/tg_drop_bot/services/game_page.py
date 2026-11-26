@@ -17,8 +17,10 @@ CAPTCHA_POLICY_EN = (
 )
 
 
-def render_game_page(template: str, *, captcha: bool) -> str:
+def render_game_page(template: str, *, captcha: bool, live_transport: bool = False) -> str:
     metadata = f'<meta name="game-client-version" content="{__version__}">'
+    if captcha and live_transport:
+        metadata += '<meta name="frog-live-transport" content="websocket">'
     notice = ""
     if captcha:
         metadata += (
@@ -28,7 +30,9 @@ def render_game_page(template: str, *, captcha: bool) -> str:
             f'content="{escape(CAPTCHA_POLICY_EN, quote=True)}">'
         )
         notice = f'<p role="note" data-purpose="anti-bot-verification">{CAPTCHA_POLICY}</p>'
-    return template.replace('<!--CAPTCHA_METADATA-->', metadata).replace(
+    return template.replace('__GAME_CLIENT_VERSION__', __version__).replace(
+        '<!--CAPTCHA_METADATA-->', metadata,
+    ).replace(
         '<!--CAPTCHA_NOTICE-->', notice,
     )
 

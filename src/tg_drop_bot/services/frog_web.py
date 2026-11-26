@@ -14,7 +14,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, User, WebA
 from aiohttp import web
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
-from sqlalchemy import select, update
+from sqlalchemy import case, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tg_drop_bot.config import Settings
@@ -28,6 +28,7 @@ from tg_drop_bot.db.models import (
 from tg_drop_bot.services.captcha import captcha_response_ms
 from tg_drop_bot.services.dates import utc_now
 from tg_drop_bot.services.frog import advance, public_game, validate_init_data
+from tg_drop_bot.services.frog_socket import register_frog_socket
 from tg_drop_bot.services.game_page import render_game_page, require_current_game_client
 from tg_drop_bot.services.game_runtime import (
     execute_command,
@@ -70,7 +71,8 @@ def register_game_routes(
     assets = Path(__file__).parent.parent / "static" / "frog"
     prefix = settings.frog_game_path
     html = render_game_page(
-        (assets / "index.html").read_text(encoding="utf-8"), captcha=True
+        (assets / "index.html").read_text(encoding="utf-8"), captcha=True,
+        live_transport=settings.frog_live_transport_enabled,
     ).replace(
         "/test/game/assets/",
         f"{prefix}/assets/",
@@ -110,15 +112,11 @@ def register_game_routes(
             redis, f"frog:current:{game['user']['id']}", f"frog:session:{token}", token, game, ttl
         )
 
-    def response(game: dict, token: str) -> web.Response:
-        return web.json_response(
-            public_game(game, time.time())
-            | {
-                "token": token,
-                "nonce": game["nonce"],
-            },
-            headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
-        )
+    def snapshot(game: dict, token: str) -> dict:
+        public = public_game(game, time.time())
+        if not game.get("live"):
+            public.update(token=token, nonce=game["nonce"])
+        return public
 
     def payload(game: dict) -> dict:
         result = {
@@ -181,7 +179,9 @@ def register_game_routes(
                         kind="game_win",
                         received_at=datetime.fromtimestamp(game["checked"], UTC),
                         challenge_id=game["audit_id"],
-                        available_at=utc_now() + timedelta(seconds=15),
+                        available_at=(
+                            None if game.get("live") else utc_now() + timedelta(seconds=15)
+                        ),
                     )
                 )
             await session.execute(
@@ -315,14 +315,47 @@ def register_game_routes(
                 async with asyncio.timeout(3):
                     await bot.send_message(uid, "Лягушка добралась! Ваше участие засчитано.")
 
-    async def locked(action: str, data: dict, user: dict) -> web.Response:
+    async def registration_status(game: dict) -> str:
+        async with sessions() as session:
+            registered = select(Participant.id).where(
+                Participant.giveaway_id == game["giveaway_id"],
+                Participant.user_id == game["user"]["id"],
+            ).exists()
+            pending = select(ParticipationJob.id).where(
+                ParticipationJob.update_id == -game["audit_id"],
+                ParticipationJob.processed_at.is_(None),
+            ).exists()
+            return (
+                await session.scalar(
+                    select(case((registered, "registered"), (pending, "pending"), else_="rejected"))
+                )
+                or "rejected"
+            )
+
+    def live_clock(game: dict) -> None:
+        now = time.time()
+        if now >= game["flow_expires_at"] and game["status"] == "playing":
+            game["status"] = "expired"
+        else:
+            seq = game["seq"]
+            advance(game, "wait", seq, now)
+            game["seq"] = seq
+
+    async def locked(
+        action: str, data: dict, user: dict, *, connection: str | None = None,
+    ) -> dict:
         uid = user["id"]
-        if action == "start":
+        live = connection is not None
+        if action in ("start", "resume"):
+            if action == "resume" and not live:
+                raise web.HTTPNotFound()
             require_current_game_client(data)
             gid = int(data["giveaway"])
             token = await redis.get(f"frog:current:{uid}")
             raw = await redis.get(f"frog:session:{token}") if token else None
             previous = json.loads(raw) if raw else None
+            if previous and previous.get("user", {}).get("id") != uid:
+                raise ValueError("wrong owner")
             if (
                 settings.participation_queue_enabled
                 and previous
@@ -385,7 +418,32 @@ def register_game_routes(
                 and previous["status"] == "won"
             ):
                 game = previous
+                if bool(game.get("live")) != live:
+                    if live and action == "start":
+                        return {"transport": "http"}
+                    raise web.HTTPConflict(text="Откройте игру так же, как начали партию.")
             else:
+                if (
+                    live and previous and previous.get("live") and previous["giveaway_id"] == gid
+                    and (action == "resume" or previous["status"] == "playing")
+                ):
+                    if previous["status"] == "playing":
+                        live_clock(previous)
+                    if previous["status"] == "playing":
+                        async with sessions() as session:
+                            _, flow = await context(session, gid, uid, locked=False)
+                            if flow is None or flow.challenge_id != previous["challenge_id"]:
+                                raise web.HTTPConflict(
+                                    text="Проверка заменена. Откройте игру из бота."
+                                )
+                    previous["connection"] = connection
+                    await persist(previous, token)
+                    if previous["status"] != "playing":
+                        await prepare_result(previous)
+                        await persist(previous, token)
+                    return snapshot(previous, token)
+                if action == "resume":
+                    raise web.HTTPConflict(text="Партия недоступна. Начните заново из игры.")
                 async with sessions() as session:
                     _, flow = await context(session, gid, uid, locked=False)
                     challenge_id = flow.challenge_id if flow else None
@@ -401,14 +459,18 @@ def register_game_routes(
                     previous
                     and previous["giveaway_id"] == gid
                     and previous.get("user", {}).get("id") == uid
-                    and previous.get("difficulty") == "hard"
                     and previous.get("challenge_id") == challenge_id
                     and previous["status"] == "playing"
+                    and (previous.get("difficulty") == "hard" or previous.get("live"))
                 ):
+                    if bool(previous.get("live")) != live:
+                        if live:
+                            return {"transport": "http"}
+                        raise web.HTTPConflict(text="Откройте игру так же, как начали партию.")
                     previous = advance(previous, "wait", previous["seq"], time.time())
                     if previous["status"] == "playing":
                         await persist(previous, token)
-                        return response(previous, token)
+                        return snapshot(previous, token)
                     await prepare_result(previous)
                 # CPU generation is outside transactions and giveaway-wide locks.
                 await quota(redis, f"frog:start:{uid}:{int(time.time()) // 60}", 10, 120)
@@ -417,6 +479,9 @@ def register_game_routes(
                 async with sessions.begin() as session:
                     _, flow = await context(session, gid, uid, locked=True)
                     challenge_id = flow.challenge_id if flow else None
+                    flow_expires_at = (
+                        flow.expires_at.timestamp() if flow and flow.expires_at else None
+                    )
                     if await session.scalar(
                         select(Participant.id).where(
                             Participant.giveaway_id == gid,
@@ -436,6 +501,9 @@ def register_game_routes(
                     challenge_id=challenge_id,
                     nonce=secrets.token_urlsafe(24),
                 )
+                if live:
+                    assert flow_expires_at is not None
+                    game.update(live=True, connection=connection, flow_expires_at=flow_expires_at)
                 async with sessions.begin() as session:
                     record = AuditLog(
                         giveaway_id=gid,
@@ -451,8 +519,10 @@ def register_game_routes(
                     await session.flush()
                     game["audit_id"] = record.id
                 token = secrets.token_urlsafe(32)
-        elif action == "move":
-            token = data["token"]
+        elif action in ("move", "sync"):
+            if action == "sync" and not live:
+                raise web.HTTPNotFound()
+            token = await redis.get(f"frog:current:{uid}") if live else data["token"]
             if not isinstance(token, str) or len(token) > 100:
                 raise ValueError("invalid token")
             current, raw = await redis.mget(f"frog:current:{uid}", f"frog:session:{token}")
@@ -461,17 +531,33 @@ def register_game_routes(
             game = json.loads(raw)
             if game["user"]["id"] != uid:
                 raise ValueError("wrong owner")
-            game = await execute_command(game, data)
+            if bool(game.get("live")) != live or (live and game["connection"] != connection):
+                raise web.HTTPConflict(text="Партия открыта в другом окне. Откройте игру заново.")
+            if not live:
+                game = await execute_command(game, data)
+            elif game["status"] == "playing":
+                if action == "sync":
+                    live_clock(game)
+                elif data["seq"] == game["seq"]:
+                    game = await execute_command(
+                        game, {"seq": data["seq"], "direction": "up", "nonce": game["nonce"]},
+                        deadline=game["flow_expires_at"],
+                    )
         else:
             raise web.HTTPNotFound()
+        if live:
+            game["connection"] = connection
         await persist(game, token)
         if game["status"] != "playing":
             await prepare_result(game)
             await persist(game, token)
-        if game["status"] == "won":
+        if game["status"] == "won" and not live:
             await finalize(game)
             await persist(game, token)
-        return response(game, token)
+        public = snapshot(game, token)
+        if live and game["status"] == "won":
+            public["registration"] = await registration_status(game)
+        return public
 
     async def page(request: web.Request) -> web.Response:
         return web.Response(
@@ -484,7 +570,11 @@ def register_game_routes(
             user = validate_init_data(data["initData"], settings.bot_token, time.time())
             await quota(redis, f"frog:rate:{user['id']}:{int(time.time()) // 10}", 100, 20)
             async with redis.lock(f"frog:lock:{user['id']}", timeout=30, blocking_timeout=2):
-                return await locked(request.match_info["action"], data, user)
+                state = await locked(request.match_info["action"], data, user)
+                return web.json_response(
+                    state,
+                    headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+                )
         except (ValueError, KeyError, TypeError):
             raise web.HTTPBadRequest(text="Проверка устарела. Откройте игру из бота.") from None
         except (RedisError, TimeoutError):
@@ -499,3 +589,5 @@ def register_game_routes(
     app.router.add_get(f"{prefix}/", page)
     app.router.add_post(f"{prefix}/api/{{action}}", api)
     app.router.add_static(f"{prefix}/assets/", assets / "assets")
+    if settings.frog_live_transport_enabled:
+        register_frog_socket(app, settings, redis, locked)

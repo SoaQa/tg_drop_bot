@@ -3,6 +3,7 @@ WORKDIR /web
 COPY frontend/package*.json ./
 RUN npm ci
 COPY frontend/src.jsx frontend/wind.mjs frontend/beacon.mjs frontend/lasers.mjs frontend/game_runtime.mjs ./
+COPY frontend/live_game.mjs ./
 RUN npm run build
 
 FROM ghcr.io/astral-sh/uv:0.6.1-python3.12-bookworm AS builder

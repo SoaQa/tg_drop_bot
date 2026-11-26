@@ -1,6 +1,65 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {clockElapsed,syncClock,collisionHint,HOP_COOLDOWN_MS,visualRow,hopUnapplied,reconcileHop,vehicleStyle} from './game_runtime.mjs';
+import {HopBuffer,liveGame} from './live_game.mjs';
+
+test('Two local jumps can be rendered before either acknowledgement',()=>{
+ const buffer=new HopBuffer();buffer.reset(7);
+ assert.equal(buffer.take(100),7);
+ assert.equal(buffer.take(380),8);
+ assert.equal(buffer.take(660),null);
+ assert.equal(buffer.acknowledge(8,700),600);
+ assert.equal(buffer.size,1);
+ assert.equal(buffer.take(710),9);
+ buffer.reset(10);
+ assert.equal(buffer.size,0);
+ assert.equal(buffer.take(720),10);
+});
+
+test('A dropped connection resumes without replaying unconfirmed taps',async(t)=>{
+ const sockets=[];
+ class FakeSocket{
+  static OPEN=1;
+  readyState=1;bufferedAmount=0;sent=[];
+  constructor(){sockets.push(this);}
+  send(data){this.sent.push(JSON.parse(data));}
+  receive(event){this.onmessage({data:JSON.stringify(event)});}
+  close(){this.readyState=3;this.onclose();}
+ }
+ const original=globalThis.WebSocket;
+ globalThis.WebSocket=FakeSocket;
+ const interrupts=[];
+ const live=liveGame({url:'ws://localhost',authentication:{initData:'fixture'},giveaway:1,
+  onState:()=>{},onInterrupted:()=>interrupts.push(true),onError:assert.fail});
+ t.after(()=>{live.close();globalThis.WebSocket=original;});
+ const started=live.start(),first=sockets[0];
+ first.onopen();first.receive({type:'ready'});
+ assert.equal(await started,true);
+ first.receive({type:'state',action:'start',state:{seq:0,status:'playing'}});
+ assert.equal(live.jump(),1);
+ assert.equal(live.jump(),2);
+ first.close();
+ assert.equal(live.jump(),null);
+ await new Promise(resolve=>setTimeout(resolve,280));
+ const second=sockets[1];second.onopen();second.receive({type:'ready'});
+ assert.deepEqual(second.sent.map(({action})=>action),['hello','resume']);
+ second.receive({type:'state',action:'resume',state:{seq:1,status:'playing'}});
+ assert.equal(live.jump(),1);
+ assert.deepEqual(second.sent.at(-1),{action:'move',seq:1});
+ assert.equal(interrupts.length,1);
+});
+
+test('Failure before WebSocket authentication leaves HTTP start available',async(t)=>{
+ const original=globalThis.WebSocket;
+ globalThis.WebSocket=class {
+  constructor(){queueMicrotask(()=>this.onclose());}
+  close(){this.onclose();}
+ };
+ const live=liveGame({url:'ws://localhost',authentication:{},giveaway:1,
+  onState:assert.fail,onInterrupted:assert.fail,onError:assert.fail});
+ t.after(()=>{live.close();globalThis.WebSocket=original;});
+ assert.equal(await live.start(),false);
+});
 
 test('RTT clock corrections never move the traffic clock backward',()=>{
  const first={elapsed:5,local:1000,correction:0};
