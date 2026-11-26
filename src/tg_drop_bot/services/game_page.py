@@ -17,10 +17,14 @@ CAPTCHA_POLICY_EN = (
 )
 
 
-def render_game_page(template: str, *, captcha: bool, live_transport: bool = False) -> str:
+def render_game_page(
+    template: str, *, captcha: bool, live_transport: bool = False, mode_selection: bool = False,
+) -> str:
     metadata = f'<meta name="game-client-version" content="{__version__}">'
     if captcha and live_transport:
         metadata += '<meta name="frog-live-transport" content="websocket">'
+    if captcha and mode_selection:
+        metadata += '<meta name="frog-mode-selection" content="enabled">'
     notice = ""
     if captcha:
         metadata += (

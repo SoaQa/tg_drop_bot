@@ -1,0 +1,29 @@
+services:
+  caddy:
+    image: caddy:2-alpine
+    environment:
+      WEBHOOK_URL: ${WEBHOOK_URL:?Укажите HTTPS URL тестового бота с портом 8443}
+      TEST_TLS_BASENAME: ${TEST_TLS_BASENAME:?Укажите имя файлов сертификата без расширения}
+    depends_on:
+      frog_bot:
+        condition: service_started
+    ports: ["8443:8443/tcp"]
+    volumes:
+      - type: bind
+        source: ./docker/Caddyfile.test
+        target: /etc/caddy/Caddyfile
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${TEST_TLS_CERT_DIR:?Укажите каталог сертификата тестового HTTPS}
+        target: /certs
+        read_only: true
+        bind:
+          create_host_path: false
+    networks: [edge]
+    mem_limit: 64m
+    cpus: 0.10
+    labels:
+      com.centurylinklabs.watchtower.enable: "false"
+    restart: unless-stopped

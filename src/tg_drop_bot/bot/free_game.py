@@ -10,11 +10,14 @@ top_router = Router(name="hard_top")
 
 
 @top_router.message(Command("top", "Top"))
-async def show_top(message: Message, session: AsyncSession) -> None:
+async def show_top(
+    message: Message, session: AsyncSession, settings: Settings | None = None,
+) -> None:
     from tg_drop_bot.services.hard_game import leaderboard_text
 
     await message.answer(await leaderboard_text(
         session, message.chat.id if message.chat.type != 'private' else None,
+        mode_selection=bool(settings and settings.frog_mode_selection_enabled),
     ))
 
 

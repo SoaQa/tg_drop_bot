@@ -108,6 +108,9 @@ class MemoryRedis:
         (True, "transient_condition"),
         (True, "transient_worker"),
         (True, "live"),
+        (True, "mode_socket"),
+        (True, "mode_http"),
+        (True, "mode_reopen"),
     ],
 )
 async def test_api_rejects_fake_success_wrong_owner_replays_and_records_real_finish(
@@ -148,7 +151,9 @@ async def test_api_rejects_fake_success_wrong_owner_replays_and_records_real_fin
     settings = Settings(
         BOT_TOKEN=TOKEN,
         FROG_GAME_ENABLED=True,
-        FROG_LIVE_TRANSPORT_ENABLED=failure == "live",
+        FROG_LIVE_TRANSPORT_ENABLED=failure in ("live", "mode_socket", "mode_reopen"),
+        FROG_MODE_SELECTION_ENABLED=failure in ("mode_socket", "mode_http", "mode_reopen"),
+        FROG_REOPEN_HARD_GIVEAWAY_ID=1 if failure == "mode_reopen" else 0,
         PARTICIPATION_QUEUE_ENABLED=queued,
         WEBHOOK_URL="https://example.test",
     )
@@ -243,11 +248,12 @@ async def test_api_rejects_fake_success_wrong_owner_replays_and_records_real_fin
                         )
                         == "duplicate"
                     )
-                    # Already accepted games may finish while the draw drains.
-                    giveaway = await s.get(Giveaway, gid)
-                    assert giveaway is not None
-                    giveaway.intake_closed_at = utc_now()
-                    giveaway.deadline_at = utc_now() - timedelta(seconds=1)
+                    if not settings.frog_mode_selection_enabled:
+                        # Already accepted games may finish while the draw drains.
+                        giveaway = await s.get(Giveaway, gid)
+                        assert giveaway is not None
+                        giveaway.intake_closed_at = utc_now()
+                        giveaway.deadline_at = utc_now() - timedelta(seconds=1)
                 assert (
                     await client.post(
                         "/game/api/start",
@@ -258,6 +264,17 @@ async def test_api_rejects_fake_success_wrong_owner_replays_and_records_real_fin
                         },
                     )
                 ).status == 409
+            if settings.frog_mode_selection_enabled:
+                assert 'name="frog-mode-selection" content="enabled"' in html
+                if failure == "mode_reopen":
+                    await check_reopened_game(
+                        client, sessions, settings, bot, memory, clock, gid, init,
+                    )
+                    return
+                await check_mode_selection(
+                    client, sessions, settings, bot, memory, clock, gid, init,
+                )
+                return
             if failure == "live":
                 await check_live_game(
                     client, sessions, settings, bot, memory, clock, gid, init, monkeypatch
@@ -759,3 +776,170 @@ async def check_live_game(
         claim = await s.get(HardGameAttempt, (gid, 123))
         assert claim is not None and claim.completed_at is not None
     await resumed.close()
+
+
+async def check_mode_selection(client, sessions, settings, bot, memory, clock, gid, init) -> None:
+    import json
+
+    from tg_drop_bot.services.participation_worker import process_participation_job
+
+    live = settings.frog_live_transport_enabled
+    socket = None
+
+    async def connect():
+        ws = await client.ws_connect("/game/live", headers={"Origin": settings.webhook_url})
+        await ws.send_json({"action": "hello", "clientVersion": __version__, "initData": init})
+        assert (await ws.receive_json(timeout=4))["type"] == "ready"
+        return ws
+
+    async def command(action, status=200, **data):
+        if socket is not None:
+            await socket.send_json({"action": action, **data})
+            result = await socket.receive_json(timeout=5)
+            if status != 200:
+                assert result["type"] == "error" and result["status"] == status, result
+                return None
+            assert result["type"] == "state", result
+            return result["state"]
+        async with client.post("/game/api/" + action, json={
+            "initData": init, "clientVersion": __version__, **data,
+        }) as response:
+            assert response.status == status, await response.text()
+            return await response.json() if status == 200 else None
+
+    async def finish(state, *, lost=False, pass_checkpoint=False):
+        token = memory.data["frog:current:123"]
+        key = "frog:session:" + token
+        game = json.loads(memory.data[key])
+        # Keep this route an integration fixture only; its result still comes from physics.
+        dest = game["checkpoint_row"] + 1 if pass_checkpoint else game["y"] + 1
+        game.update(rows=dest + 1, lanes=[
+            {"row": dest, "count": 1, "kind": "car", "phase": 4, "speed": 0},
+        ] if lost else [])
+        memory.data[key] = json.dumps(game)
+        final = state
+        for _ in range(dest - game["y"]):
+            clock[0] += 0.4
+            auth = {} if live else {
+                "token": final["token"], "nonce": final["nonce"], "direction": "up",
+            }
+            final = await command("move", seq=final["seq"], **auth)
+        assert final["status"] == ("lost" if lost else "won")
+        return final
+
+    try:
+        if live:
+            socket = await connect()
+        easy = await command("start", giveaway=gid)
+        assert easy["difficulty"] == "easy" and easy["hardAttemptsLeft"] == 3
+        assert easy["y"] == 0 and not easy["checkpointReached"]
+        assert any(lane["kind"] == "mower" for lane in easy["lanes"])
+        assert (await finish(easy, lost=True, pass_checkpoint=True))["checkpointReached"]
+        easy = await command("start", giveaway=gid, difficulty="easy")
+        assert easy["y"] == 3 and easy["checkpointReached"]
+        assert any(lane["kind"] == "mower" for lane in easy["lanes"])
+        await finish(easy, lost=True)
+        easy = await command("start", giveaway=gid, difficulty="easy")
+        assert easy["y"] == 3 and easy["checkpointReached"]
+        assert all(lane["kind"] != "mower" for lane in easy["lanes"])
+        hard = await command("start", giveaway=gid, difficulty="hard")
+        assert hard["difficulty"] == "hard" and hard["hardAttemptsLeft"] == 2
+        assert hard["y"] == 0 and "checkpointReached" not in hard
+        if live:
+            assert socket is not None
+            await socket.close()
+            socket = await connect()
+            resumed = await command("resume", giveaway=gid)
+            assert resumed["started"] == hard["started"] and resumed["hardAttemptsLeft"] == 2
+        else:
+            resumed = await command("start", giveaway=gid, difficulty="hard")
+            assert resumed["token"] == hard["token"] and resumed["hardAttemptsLeft"] == 2
+        easy = await command("start", giveaway=gid, difficulty="easy")
+        assert easy["difficulty"] == "easy" and easy["hardAttemptsLeft"] == 2
+        won = await finish(easy)
+        if live:
+            assert won["registration"] == "pending"
+            assert (await command("start", giveaway=gid, difficulty="hard"))["difficulty"] == "easy"
+            async with sessions() as db:
+                job_id = await db.scalar(select(ParticipationJob.id).where(
+                    ParticipationJob.kind == "game_win",
+                ))
+                assert job_id is not None
+            await process_participation_job(sessions, bot, settings, job_id)
+            assert (await command("sync"))["registration"] == "registered"
+        else:
+            assert won["registration"] == "registered"
+        hard = await command("start", giveaway=gid, difficulty="hard")
+        assert hard["hardAttemptsLeft"] == 1 and hard["registration"] == "registered"
+        await finish(hard, lost=True)
+        hard = await command("start", giveaway=gid, difficulty="hard")
+        assert hard["hardAttemptsLeft"] == 0
+        if live:
+            await finish(hard, lost=True)
+            await command("start", giveaway=gid, difficulty="hard", status=409)
+        else:
+            assert (await finish(hard))["registration"] == "registered"
+        async with sessions() as db:
+            assert await db.scalar(select(func.count()).select_from(Participant)) == 1
+            assert await db.scalar(select(func.count()).select_from(ParticipationJob).where(
+                ParticipationJob.kind == "game_win",
+            )) == 1
+            claim = await db.get(HardGameAttempt, (gid, 123))
+            assert claim is not None and claim.attempts_used == 3
+            assert (claim.completed_at is None) == live
+    finally:
+        if socket is not None:
+            await socket.close()
+
+
+async def check_reopened_game(client, sessions, settings, bot, memory, clock, gid, init) -> None:
+    import json
+
+    from tg_drop_bot.services.hard_game import claim_hard_attempt, record_hard_completion
+    from tg_drop_bot.services.participation_queue import admit_start
+    from tg_drop_bot.services.participation_worker import close_flow, process_participation_job
+
+    finished_at = datetime.fromtimestamp(clock[0] - 1, UTC)
+    async with sessions.begin() as db:
+        db.add(Participant(giveaway_id=gid, user_id=123, joined_at=finished_at,
+                           captcha_passed_at=finished_at))
+        assert await claim_hard_attempt(db, gid, 123, "legacy")
+        await record_hard_completion(db, gid, 123, "legacy", 19000, finished_at)
+        flow = await db.scalar(select(ParticipationFlow).where(ParticipationFlow.user_id == 123))
+        assert flow is not None
+        close_flow(flow)
+    async with sessions.begin() as db:
+        assert await admit_start(
+            db, giveaway_id=gid, user=User(id=123, is_bot=False, first_name="Тест"),
+            update_id=3, received_at=utc_now(), allow_new=AsyncMock(return_value=True),
+        ) == "accepted"
+        job = await db.scalar(select(ParticipationJob.id).where(ParticipationJob.update_id == 3))
+        assert job is not None
+    await process_participation_job(sessions, bot, settings, job)
+    keyboard = bot.send_message.call_args.kwargs["reply_markup"]
+    assert f"/game/?giveaway={gid}&ranking=1" in keyboard.inline_keyboard[0][0].web_app.url
+
+    async with client.ws_connect("/game/live", headers={"Origin": settings.webhook_url}) as ws:
+        await ws.send_json({"action": "hello", "clientVersion": __version__, "initData": init})
+        assert (await ws.receive_json(timeout=4))["type"] == "ready"
+        for remaining in (2, 1, 0):
+            await ws.send_json({"action": "start", "giveaway": gid, "difficulty": "hard"})
+            state = (await ws.receive_json(timeout=5))["state"]
+            assert state["hardAttemptsLeft"] == remaining
+            assert state["y"] == 0 and state["registration"] == "registered"
+            token = memory.data["frog:current:123"]
+            game_key = "frog:session:" + token
+            game = json.loads(memory.data[game_key])
+            game.update(rows=2, lanes=[])
+            memory.data[game_key] = json.dumps(game)
+            clock[0] += 0.4
+            await ws.send_json({"action": "move", "seq": state["seq"]})
+            won = (await ws.receive_json(timeout=5))["state"]
+            assert won["status"] == "won" and won["hardAttemptsLeft"] == remaining
+        await ws.send_json({"action": "start", "giveaway": gid, "difficulty": "hard"})
+        assert (await ws.receive_json(timeout=5))["status"] == 409
+    async with sessions() as db:
+        score = await db.get(HardGameAttempt, (gid, 123))
+        assert score is not None and score.attempts_used == 3
+        assert score.completed_at == finished_at and score.duration_ms == 19000
+        assert await db.scalar(select(func.count()).select_from(Participant)) == 1

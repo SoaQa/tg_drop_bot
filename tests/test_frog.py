@@ -211,6 +211,120 @@ def test_second_vehicle_is_visible_to_server_and_legacy_sessions_keep_one_vehicl
     assert not collision(game, 3, 1, 1000)
 
 
+@pytest.mark.parametrize(("relaxed", "clear_gap"), [(False, 2.74), (True, 3.15)])
+def test_easy_clear_gap_keeps_vehicle_count_speed_and_hitbox(relaxed, clear_gap):
+    game = new_game({}, 1, 0, relaxed=relaxed)
+    lane = game["lanes"][0]
+    assert lane["count"] == 2
+    assert abs(lane["speed"]) == pytest.approx(0.675)
+    public_lane = public_game(game, 0)["lanes"][0]
+    assert public_lane.get("trackLength") == (9.82 if relaxed else None)
+
+    lane["phase"] = 4
+    first_exit = 0.88 / abs(lane["speed"])
+    next_entry = (0.88 + clear_gap) / abs(lane["speed"])
+    assert collision(game, 3, 1, first_exit - 0.001)
+    assert not collision(game, 3, 1, first_exit + 0.001)
+    assert not collision(game, 3, 1, next_entry - 0.001)
+    assert collision(game, 3, 1, next_entry + 0.001)
+
+
+@pytest.mark.parametrize("assisted", [False, True])
+def test_relaxed_fallback_keeps_four_road_lanes(monkeypatch, assisted):
+    from tg_drop_bot.services import frog
+
+    monkeypatch.setattr(frog.secrets, "randbelow", lambda n: 0)
+    validations = []
+
+    def reject_layout(lanes, *, minimum_hop):
+        validations.append(minimum_hop)
+        return False
+
+    # Exhaust the random retry budget independently of which phases the RNG produces.
+    with monkeypatch.context() as patch:
+        patch.setattr(frog, "blocks_blind_rushes", reject_layout)
+        game = new_game({}, 1, 0, relaxed=True, assisted=assisted)
+
+    assert validations == [frog.HOP_COOLDOWN] * 64
+    assert game["rows"] == 7
+    assert [lane["row"] for lane in game["lanes"] if lane["kind"] == "car"] == [1, 2, 4, 5]
+    assert all(lane["trackLength"] == 9.82 for lane in game["lanes"])
+    median = [lane for lane in game["lanes"] if lane["row"] == 3]
+    if assisted:
+        assert not median
+        assert not collision(game, 3, 3, 5)
+    else:
+        assert len(median) == 1 and median[0]["kind"] == "mower"
+        assert abs(median[0]["speed"]) == pytest.approx(0.3375)
+    assert frog.blocks_blind_rushes(game["lanes"])
+    assert frog.has_timed_route(game)
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+def test_checkpoint_restart_keeps_mower_away_and_has_a_route(monkeypatch, fallback):
+    from random import Random
+
+    from tg_drop_bot.services import frog
+
+    monkeypatch.setattr(frog.secrets, "randbelow", Random(330).randrange)
+    with monkeypatch.context() as patch:
+        if fallback:
+            patch.setattr(frog, "blocks_blind_rushes", lambda *args, **kwargs: False)
+        for _ in range(8):
+            game = new_game({}, 1, 1000, relaxed=True, from_checkpoint=True)
+            assert game["y"] == game["checkpoint_row"] == 3
+            assert public_game(game, 1000)["checkpointReached"]
+            assert any(lane["kind"] == "mower" for lane in game["lanes"])
+            assert frog.has_timed_route(game, start_row=3)
+            advance(game, "wait", 0, 1003)
+            assert game["status"] == "playing"
+
+
+@pytest.mark.parametrize("safe_landing", [False, True])
+def test_only_a_safe_landing_claims_checkpoint(safe_landing):
+    game = new_game({}, 1, 1000, relaxed=True)
+    game.update(y=2, lanes=[] if safe_landing else [
+        {"kind": "mower", "row": 3, "phase": 4, "speed": 0},
+    ])
+    advance(game, "up", 0, 1000.4)
+    assert game["y"] == 3
+    assert public_game(game, 1000.4)["checkpointReached"] is safe_landing
+
+
+@pytest.mark.parametrize("assisted", [False, True])
+async def test_generator_forwards_easy_layout_options(monkeypatch, assisted):
+    from random import Random
+
+    from tg_drop_bot.services.frog import blocks_blind_rushes, has_timed_route
+    from tg_drop_bot.services.game_runtime import GameGenerator
+
+    monkeypatch.setattr("tg_drop_bot.services.frog.secrets.randbelow", Random(4511).randrange)
+    generator = GameGenerator()
+    for _ in range(15):
+        game = await generator.generate({}, 1, "easy", relaxed=True, assisted=assisted)
+        assert game["difficulty"] == "easy"
+        assert game["rows"] == 7
+        assert [lane["row"] for lane in game["lanes"] if lane["kind"] == "car"] == [1, 2, 4, 5]
+        assert all(lane["trackLength"] == 9.82 for lane in game["lanes"])
+        assert any(lane["kind"] == "mower" for lane in game["lanes"]) == (not assisted)
+        assert blocks_blind_rushes(game["lanes"])
+        assert has_timed_route(game)
+
+
+@pytest.mark.parametrize("difficulty", ["easy", "hard"])
+def test_assistance_does_not_change_legacy_or_hard_physics(monkeypatch, difficulty):
+    monkeypatch.setattr("tg_drop_bot.services.frog.secrets.randbelow", lambda n: 0)
+    legacy = new_game({}, 1, 0, difficulty=difficulty)
+    assert new_game({}, 1, 0, difficulty=difficulty, assisted=True) == legacy
+    assert all("trackLength" not in lane for lane in legacy["lanes"])
+    assert any(lane["kind"] == "mower" for lane in legacy["lanes"])
+    if difficulty == "hard":
+        hard = new_game({}, 1, 0, difficulty=difficulty, relaxed=True, assisted=True,
+                        from_checkpoint=True)
+        assert hard == legacy
+        assert "checkpointReached" not in public_game(hard, 0)
+
+
 def test_hard_lasers_solvable_and_easy_has_no_lasers(monkeypatch):
     import random
 

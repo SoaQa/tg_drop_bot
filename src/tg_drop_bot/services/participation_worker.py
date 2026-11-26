@@ -14,7 +14,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tg_drop_bot.bot.keyboards import captcha_keyboard
 from tg_drop_bot.config import Settings
-from tg_drop_bot.db.models import Giveaway, Participant, ParticipationFlow, ParticipationJob
+from tg_drop_bot.db.models import (
+    Giveaway,
+    HardGameAttempt,
+    Participant,
+    ParticipationFlow,
+    ParticipationJob,
+)
 from tg_drop_bot.services.captcha import (
     CAPTCHA_ALPHABET,
     captcha_response_ms,
@@ -24,6 +30,7 @@ from tg_drop_bot.services.captcha import (
 from tg_drop_bot.services.conditions import check_participant_conditions
 from tg_drop_bot.services.dates import utc_now
 from tg_drop_bot.services.giveaways import get_giveaway, register_participant_after_condition_check
+from tg_drop_bot.services.hard_game import hard_attempts_left
 from tg_drop_bot.services.membership import PARTICIPATION_DENIED, get_active_exclusion
 from tg_drop_bot.services.participation_queue import accepts_new_requests, earlier_unprocessed_job
 
@@ -88,6 +95,18 @@ async def issue_captcha(
         )
     ):
         close_flow(flow)
+        if settings.frog_mode_selection_enabled and accepts_new_requests(giveaway, utc_now()):
+            attempt = await session.get(HardGameAttempt, (giveaway.id, flow.user_id))
+            reopening = giveaway.id == settings.frog_reopen_hard_giveaway_id
+            if hard_attempts_left(attempt, reopening=reopening):
+                from tg_drop_bot.services.frog_web import game_keyboard
+
+                with contextlib.suppress(TelegramForbiddenError, TelegramBadRequest):
+                    await bot.send_message(
+                        flow.user_id, "Ваше участие уже засчитано. Можно сыграть для /top.",
+                        reply_markup=game_keyboard(settings, giveaway.id, ranking=True),
+                    )
+                return None
         return "Ваше участие уже засчитано."
 
     if settings.frog_game_enabled:

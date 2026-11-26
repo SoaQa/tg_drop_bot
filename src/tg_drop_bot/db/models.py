@@ -134,6 +134,10 @@ class HardGameAttempt(Base):
     )
     user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     attempt_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    attempts_used: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    transition_budget_applied: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false",
+    )
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     duration_ms: Mapped[int | None] = mapped_column(Integer)

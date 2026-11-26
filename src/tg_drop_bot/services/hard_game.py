@@ -4,12 +4,14 @@ from datetime import datetime
 from html import escape
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select, update
+from sqlalchemy import case, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tg_drop_bot.db.models import Giveaway, HardGameAttempt, KnownChannel, Participant
 from tg_drop_bot.services.dates import utc_now
+
+HARD_ATTEMPT_LIMIT = 3
 
 
 async def claim_hard_attempt(
@@ -19,6 +21,47 @@ async def claim_hard_attempt(
     return bool(await session.scalar(insert(HardGameAttempt).values(
         giveaway_id=giveaway_id, user_id=user_id, attempt_key=attempt_key, started_at=utc_now(),
     ).on_conflict_do_nothing().returning(HardGameAttempt.user_id)))
+
+
+async def claim_hard_game_slot(
+    session: AsyncSession, giveaway_id: int, user_id: int, attempt_key: str, *,
+    reopening: bool = False,
+) -> int | None:
+    completed = HardGameAttempt.completed_at.is_not(None)
+    start = insert(HardGameAttempt).values(
+        giveaway_id=giveaway_id, user_id=user_id, attempt_key=attempt_key, started_at=utc_now(),
+        transition_budget_applied=reopening,
+    )
+    used = (
+        case((HardGameAttempt.transition_budget_applied, HardGameAttempt.attempts_used), else_=0)
+        if reopening else HardGameAttempt.attempts_used
+    )
+    available = used < HARD_ATTEMPT_LIMIT
+    if not reopening:
+        available &= ~completed
+    claimed = await session.scalar(start.on_conflict_do_update(
+        index_elements=[HardGameAttempt.giveaway_id, HardGameAttempt.user_id],
+        set_={
+            "attempt_key": case((completed, HardGameAttempt.attempt_key),
+                                else_=start.excluded.attempt_key),
+            "started_at": case((completed, HardGameAttempt.started_at),
+                                else_=start.excluded.started_at),
+            "attempts_used": used + 1,
+            "transition_budget_applied": (
+                True if reopening else HardGameAttempt.transition_budget_applied
+            ),
+        },
+        where=available,
+    ).returning(HardGameAttempt.attempts_used))
+    return HARD_ATTEMPT_LIMIT - claimed if claimed is not None else None
+
+
+def hard_attempts_left(attempt: HardGameAttempt | None, *, reopening: bool = False) -> int:
+    if attempt is None or (reopening and not attempt.transition_budget_applied):
+        return HARD_ATTEMPT_LIMIT
+    if not reopening and attempt.completed_at is not None:
+        return 0
+    return max(0, HARD_ATTEMPT_LIMIT - attempt.attempts_used)
 
 
 async def record_hard_completion(
@@ -32,7 +75,9 @@ async def record_hard_completion(
     ).values(completed_at=completed_at, duration_ms=duration_ms))
 
 
-async def leaderboard_text(session: AsyncSession, chat_id: int | None = None) -> str:
+async def leaderboard_text(
+    session: AsyncSession, chat_id: int | None = None, *, mode_selection: bool = False,
+) -> str:
     query = select(Giveaway).where(Giveaway.status.in_(['published', 'finished']))
     if chat_id is not None:
         query = query.join(KnownChannel).where(KnownChannel.telegram_chat_id == chat_id)
@@ -88,5 +133,6 @@ async def leaderboard_text(session: AsyncSession, chat_id: int | None = None) ->
         name = ('@'+profile.username if profile and profile.username
                 else profile.first_name if profile and profile.first_name else 'Игрок')
         lines.append(f'{place}. {escape(name[:32])}: {count}')
-    lines.append("Одна сложная попытка на розыгрыш. Место в топе не меняет шанс на приз.")
+    attempts = "До 3 сложных попыток" if mode_selection else "Одна сложная попытка"
+    lines.append(f"{attempts} на розыгрыш. Место в топе не меняет шанс на приз.")
     return '\n'.join(lines)

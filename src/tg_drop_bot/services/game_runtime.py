@@ -122,7 +122,16 @@ class GameGenerator:
     def __init__(self) -> None:
         self.slots = asyncio.Semaphore(2)
 
-    async def generate(self, user: dict, gid: int, difficulty: str) -> dict:
+    async def generate(
+        self,
+        user: dict,
+        gid: int,
+        difficulty: str,
+        *,
+        relaxed: bool = False,
+        assisted: bool = False,
+        from_checkpoint: bool = False,
+    ) -> dict:
         try:
             await asyncio.wait_for(self.slots.acquire(), timeout=2)
         except TimeoutError:
@@ -132,8 +141,10 @@ class GameGenerator:
             ) from None
         # Cancelling an awaiting request cannot stop an already running CPU thread.
         # Retain its slot until the actual construction task has completed.
+        layout = ({"relaxed": True, "assisted": assisted, "from_checkpoint": from_checkpoint}
+                  if relaxed else {})
         construction = asyncio.create_task(
-            asyncio.to_thread(new_game, user, gid, 0, difficulty=difficulty)
+            asyncio.to_thread(new_game, user, gid, 0, difficulty=difficulty, **layout)
         )
 
         def completed(task: asyncio.Task[dict]) -> None:

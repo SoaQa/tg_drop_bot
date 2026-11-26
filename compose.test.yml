@@ -1,17 +1,35 @@
 name: tg_drop_bot_test
+
+x-test-runtime: &test-runtime
+  image: tg-drop-bot-test:${TEST_IMAGE_TAG:?Укажите уникальный тег тестовой сборки}
+  pull_policy: never
+  # Исключите этот файл из контекста сборки и используйте только тестовый токен.
+  env_file: ${TEST_ENV_FILE:?Укажите файл окружения тестового бота}
+  environment:
+    DATABASE_URL: postgresql+asyncpg://frog_test:${POSTGRES_PASSWORD:?Укажите пароль тестовой БД}@postgres:5432/frog_test
+    REDIS_URL: redis://redis:6379/0
+    TELEGRAM_MODE: webhook
+    WEBAPP_HOST: 0.0.0.0
+    WEBAPP_PORT: "8080"
+  networks: [internal, edge]
+  labels:
+    com.centurylinklabs.watchtower.enable: "false"
+  restart: unless-stopped
+
 services:
   postgres:
     image: postgres:16-alpine
+    command: [postgres, -c, shared_buffers=32MB]
     environment:
       POSTGRES_DB: frog_test
       POSTGRES_USER: frog_test
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Укажите пароль тестовой БД}
     volumes: ["postgres_data:/var/lib/postgresql/data"]
     networks: [internal]
     mem_limit: 160m
     cpus: 0.20
     healthcheck:
-      test: [CMD-SHELL, "pg_isready -U frog_test -d frog_test"]
+      test: [CMD, pg_isready, -h, 127.0.0.1, -U, frog_test, -d, frog_test]
       interval: 5s
       retries: 15
     restart: unless-stopped
@@ -22,32 +40,43 @@ services:
     networks: [internal]
     mem_limit: 64m
     cpus: 0.10
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      retries: 15
     restart: unless-stopped
   frog_bot:
+    <<: *test-runtime
     build:
       context: .
-      dockerfile: Dockerfile.test
-    image: tg-drop-bot-test:0.32.0
-    env_file: .env
-    environment:
-      DATABASE_URL: postgresql+asyncpg://frog_test:${POSTGRES_PASSWORD}@postgres:5432/frog_test
-      REDIS_URL: redis://redis:6379/0
+      dockerfile: Dockerfile
     depends_on:
       postgres:
         condition: service_healthy
       redis:
-        condition: service_started
-    networks: [internal, edge]
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, python, -c, "import socket; socket.create_connection(('127.0.0.1', 8080), timeout=2).close()"]
+      start_period: 30s
+      interval: 10s
+      timeout: 5s
+      retries: 6
     mem_limit: 256m
     cpus: 0.35
-    labels:
-      com.centurylinklabs.watchtower.enable: "false"
-    restart: unless-stopped
+  worker:
+    <<: *test-runtime
+    profiles: [participation-queue]
+    command: [dramatiq, 'tg_drop_bot.queue_worker:broker', --processes, '1', --threads, '2']
+    depends_on:
+      frog_bot:
+        condition: service_healthy
+    mem_limit: 192m
+    cpus: 0.20
 networks:
   internal:
     internal: true
   edge:
-    name: tg_drop_bot_test_edge
+    name: tg_drop_bot_test_sandbox_edge
 volumes:
   postgres_data:
   redis_data:

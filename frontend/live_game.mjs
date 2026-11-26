@@ -22,32 +22,33 @@ export class HopBuffer {
  get size(){return this.pending.length;}
 }
 
-export function liveGame({url,authentication,giveaway,onState,onInterrupted,onError,onFallback}){
+export function liveGame({url,authentication,giveaway,difficulty,onState,onInterrupted,onError,onFallback}){
  const buffer=new HopBuffer();
  let socket,handshake,retry,responseTimer,connected=false,ready=false,stopped=false,syncSent=null;
- let failures=0;
+ let failures=0,settleStart;
  const now=()=>performance.now();
  const send=message=>socket.send(JSON.stringify(message));
  const waitForState=()=>{responseTimer??=setTimeout(()=>socket.close(),8000);};
  const clearWait=()=>{clearTimeout(responseTimer);responseTimer=null;};
+ const resolveStart=value=>{settleStart?.(value);settleStart=null;};
 
- function connect(action,settle){
+ function connect(action){
   let candidate;
   try{candidate=new WebSocket(url);}
   catch{
-   if(settle)settle(false);else retryConnection();
+   if(!connected)resolveStart(false);else retryConnection();
    return;
   }
   socket=candidate;ready=false;
   handshake=setTimeout(()=>candidate.close(),1800);
-  candidate.onopen=()=>send({action:'hello',...authentication});
+  candidate.onopen=()=>{if(candidate===socket&&!stopped)send({action:'hello',...authentication});};
   candidate.onmessage=({data})=>{
    if(candidate!==socket||stopped)return;
    const event=JSON.parse(data);
    if(event.type==='ready'){
     clearTimeout(handshake);connected=true;
-    if(settle){settle(true);settle=null;}
-    send({action,giveaway});
+    resolveStart(true);
+    send({action,giveaway,...(action==='start'&&difficulty!==undefined?{difficulty}:{})});
     waitForState();
     return;
    }
@@ -77,7 +78,7 @@ export function liveGame({url,authentication,giveaway,onState,onInterrupted,onEr
   candidate.onclose=()=>{
    if(candidate!==socket||stopped)return;
    clearTimeout(handshake);clearWait();ready=false;syncSent=null;buffer.reset(0);
-   if(!connected){settle?.(false);return;}
+   if(!connected){resolveStart(false);return;}
    retryConnection();
   };
  }
@@ -89,13 +90,18 @@ export function liveGame({url,authentication,giveaway,onState,onInterrupted,onEr
  }
 
  function close(){
+  if(stopped)return;
   stopped=true;ready=false;
   clearTimeout(handshake);clearTimeout(retry);clearWait();
+  resolveStart(false);
   socket?.close();
  }
 
  return {
-  start:()=>new Promise(resolve=>connect('start',resolve)),
+  start:()=>new Promise(resolve=>{
+   if(stopped){resolve(false);return;}
+   settleStart=resolve;connect('start');
+  }),
   jump(){
    if(!ready||socket.readyState!==WebSocket.OPEN||socket.bufferedAmount>1024)return null;
    const seq=buffer.take(now());

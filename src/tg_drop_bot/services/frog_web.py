@@ -14,7 +14,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, User, WebA
 from aiohttp import web
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
-from sqlalchemy import case, select, update
+from sqlalchemy import case, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tg_drop_bot.config import Settings
@@ -42,19 +42,26 @@ from tg_drop_bot.services.giveaways import (
     is_giveaway_open,
     register_participant_after_condition_check,
 )
-from tg_drop_bot.services.hard_game import claim_hard_attempt, record_hard_completion
-from tg_drop_bot.services.participation_queue import lock_giveaway_intake
+from tg_drop_bot.services.hard_game import (
+    HARD_ATTEMPT_LIMIT,
+    claim_hard_attempt,
+    claim_hard_game_slot,
+    hard_attempts_left,
+    record_hard_completion,
+)
+from tg_drop_bot.services.participation_queue import accepts_new_requests, lock_giveaway_intake
 
 
-def game_keyboard(settings: Settings, giveaway_id: int) -> InlineKeyboardMarkup:
+def game_keyboard(
+    settings: Settings, giveaway_id: int, *, ranking: bool = False,
+) -> InlineKeyboardMarkup:
+    url = f"{settings.webhook_url}{settings.frog_game_path}/?giveaway={giveaway_id}"
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="Играть и участвовать",
-                    web_app=WebAppInfo(
-                        url=f"{settings.webhook_url}{settings.frog_game_path}/?giveaway={giveaway_id}",
-                    ),
+                    text="Играть на сложном для /top" if ranking else "Играть и участвовать",
+                    web_app=WebAppInfo(url=f"{url}&ranking=1" if ranking else url),
                 ),
             ]
         ]
@@ -70,22 +77,36 @@ def register_game_routes(
     generator = game_generator(app)
     assets = Path(__file__).parent.parent / "static" / "frog"
     prefix = settings.frog_game_path
+    choose_mode = settings.frog_mode_selection_enabled
     html = render_game_page(
         (assets / "index.html").read_text(encoding="utf-8"), captcha=True,
         live_transport=settings.frog_live_transport_enabled,
+        mode_selection=choose_mode,
     ).replace(
         "/test/game/assets/",
         f"{prefix}/assets/",
     )
 
+    async def registered(session: AsyncSession, gid: int, uid: int) -> bool:
+        return (await session.scalar(select(Participant.id).where(
+            Participant.giveaway_id == gid, Participant.user_id == uid,
+        ))) is not None
+
     async def context(
-        session: AsyncSession, gid: int, uid: int, *, locked: bool, received: datetime | None = None
+        session: AsyncSession, gid: int, uid: int, *, locked: bool,
+        received: datetime | None = None, ranking_only: bool = False,
     ):
         if locked:
             await lock_giveaway_intake(session, gid)
         giveaway = await get_giveaway(session, gid)
         if not giveaway or giveaway.status != "published":
             raise web.HTTPConflict(text="Приём заявок закрыт.")
+        if ranking_only:
+            if not accepts_new_requests(giveaway, received or utc_now()):
+                raise web.HTTPConflict(text="Приём результатов для рейтинга завершён.")
+            if not await registered(session, gid, uid):
+                raise web.HTTPConflict(text="Сначала подтвердите участие в розыгрыше.")
+            return giveaway, None
         flow = None
         if settings.participation_queue_enabled:
             query = select(ParticipationFlow).where(
@@ -114,6 +135,10 @@ def register_game_routes(
 
     def snapshot(game: dict, token: str) -> dict:
         public = public_game(game, time.time())
+        if choose_mode:
+            public["hardAttemptsLeft"] = game.get("hard_attempts_left", HARD_ATTEMPT_LIMIT)
+            if game.get("ranking_only"):
+                public["registration"] = "registered"
         if not game.get("live"):
             public.update(token=token, nonce=game["nonce"])
         return public
@@ -141,6 +166,7 @@ def register_game_routes(
             "move_count": len(game["moves"]),
             "lanes": game["lanes"],
             "difficulty": game.get("difficulty", "easy"),
+            "checkpoint_reached": game.get("checkpoint_reached", False),
             "game_result": result,
         }
 
@@ -149,6 +175,20 @@ def register_game_routes(
             return
         uid, gid = game["user"]["id"], game["giveaway_id"]
         async with sessions.begin() as session:
+            if game.get("ranking_only"):
+                if game["status"] == "won":
+                    finished = datetime.fromtimestamp(game["checked"], UTC)
+                    await context(session, gid, uid, locked=True, received=finished,
+                                  ranking_only=True)
+                    await record_hard_completion(
+                        session, gid, uid, game["hard_key"],
+                        round((game["checked"] - game["started"]) * 1000), finished,
+                    )
+                await session.execute(update(AuditLog).where(
+                    AuditLog.id == game["audit_id"], AuditLog.actor_user_id == uid,
+                ).values(action="frog.run.finished", payload=payload(game)))
+                game["logged"] = True
+                return
             # A negative update ID is reserved for a server-verified game result.
             job = (
                 await session.scalar(
@@ -351,6 +391,12 @@ def register_game_routes(
                 raise web.HTTPNotFound()
             require_current_game_client(data)
             gid = int(data["giveaway"])
+            reopening = gid == settings.frog_reopen_hard_giveaway_id
+            requested = None
+            if choose_mode and action == "start":
+                requested = data.get("difficulty", "easy")
+                if requested not in ("easy", "hard"):
+                    raise ValueError("invalid game mode")
             token = await redis.get(f"frog:current:{uid}")
             raw = await redis.get(f"frog:session:{token}") if token else None
             previous = json.loads(raw) if raw else None
@@ -411,12 +457,20 @@ def register_game_routes(
                             )
                         previous["logged"] = True
                         token = secrets.token_urlsafe(32)
+            won_here = previous and previous["giveaway_id"] == gid and previous["status"] == "won"
+            new_ranking_attempt = False
             if (
-                previous
-                and previous["giveaway_id"] == gid
-                and previous.get("user", {}).get("id") == uid
-                and previous["status"] == "won"
+                previous is not None and won_here and requested == "hard"
+                and (previous["difficulty"] == "easy" or reopening)
             ):
+                async with sessions() as session:
+                    new_ranking_attempt = await registered(session, gid, uid)
+            switching = (
+                requested is not None and previous and previous["giveaway_id"] == gid
+                and previous["status"] == "playing"
+                and (previous["difficulty"] != requested or "hard_attempts_left" not in previous)
+            )
+            if previous is not None and won_here and not new_ranking_attempt:
                 game = previous
                 if bool(game.get("live")) != live:
                     if live and action == "start":
@@ -425,14 +479,20 @@ def register_game_routes(
             else:
                 if (
                     live and previous and previous.get("live") and previous["giveaway_id"] == gid
+                    and not switching
                     and (action == "resume" or previous["status"] == "playing")
                 ):
                     if previous["status"] == "playing":
                         live_clock(previous)
                     if previous["status"] == "playing":
                         async with sessions() as session:
-                            _, flow = await context(session, gid, uid, locked=False)
-                            if flow is None or flow.challenge_id != previous["challenge_id"]:
+                            ranking_only = bool(previous.get("ranking_only"))
+                            _, flow = await context(
+                                session, gid, uid, locked=False, ranking_only=ranking_only,
+                            )
+                            if not ranking_only and (
+                                flow is None or flow.challenge_id != previous["challenge_id"]
+                            ):
                                 raise web.HTTPConflict(
                                     text="Проверка заменена. Откройте игру из бота."
                                 )
@@ -445,23 +505,41 @@ def register_game_routes(
                 if action == "resume":
                     raise web.HTTPConflict(text="Партия недоступна. Начните заново из игры.")
                 async with sessions() as session:
-                    _, flow = await context(session, gid, uid, locked=False)
-                    challenge_id = flow.challenge_id if flow else None
-                    if await session.scalar(
-                        select(Participant.id).where(
-                            Participant.giveaway_id == gid,
-                            Participant.user_id == uid,
-                        )
-                    ):
+                    already_registered = await registered(session, gid, uid)
+                    ranking_only = requested == "hard" and already_registered
+                    if already_registered and not ranking_only:
                         raise web.HTTPConflict(text="Ваше участие уже засчитано.")
-                    spent = await session.get(HardGameAttempt, (gid, uid)) is not None
+                    _, flow = await context(
+                        session, gid, uid, locked=False, ranking_only=ranking_only,
+                    )
+                    challenge_id = flow.challenge_id if flow else None
+                    attempt = await session.get(HardGameAttempt, (gid, uid))
+                    used = attempt.attempts_used if attempt else 0
+                    hard_left = hard_attempts_left(attempt, reopening=reopening)
+                    assisted = False
+                    from_checkpoint = False
+                    if requested == "easy":
+                        easy_losses, checkpoint = (await session.execute(select(
+                            func.count(),
+                            func.bool_or(AuditLog.payload["checkpoint_reached"].as_boolean()),
+                        ).where(
+                                AuditLog.giveaway_id == gid, AuditLog.actor_user_id == uid,
+                                AuditLog.action == "frog.run.finished",
+                                AuditLog.payload["difficulty"].as_string() == "easy",
+                                AuditLog.payload["status"].as_string() == "lost",
+                        ))).one()
+                        assisted = easy_losses >= 2
+                        from_checkpoint = bool(checkpoint)
                 if (
                     previous
                     and previous["giveaway_id"] == gid
                     and previous.get("user", {}).get("id") == uid
                     and previous.get("challenge_id") == challenge_id
                     and previous["status"] == "playing"
-                    and (previous.get("difficulty") == "hard" or previous.get("live"))
+                    and not switching
+                    and (
+                        choose_mode or previous.get("difficulty") == "hard" or previous.get("live")
+                    )
                 ):
                     if bool(previous.get("live")) != live:
                         if live:
@@ -474,22 +552,44 @@ def register_game_routes(
                     await prepare_result(previous)
                 # CPU generation is outside transactions and giveaway-wide locks.
                 await quota(redis, f"frog:start:{uid}:{int(time.time()) // 60}", 10, 120)
-                game = await generator.generate(user, gid, "easy" if spent else "hard")
+                if requested == "hard" and not hard_left:
+                    raise web.HTTPConflict(
+                        text="Сложные попытки закончились. Можно выбрать лёгкий режим.",
+                    )
+                if requested is not None:
+                    game = await generator.generate(
+                        user, gid, requested, relaxed=True, assisted=assisted,
+                        from_checkpoint=from_checkpoint,
+                    )
+                else:
+                    game = await generator.generate(user, gid, "easy" if used else "hard")
                 hard_key = secrets.token_urlsafe(24)
                 async with sessions.begin() as session:
-                    _, flow = await context(session, gid, uid, locked=True)
+                    giveaway, flow = await context(
+                        session, gid, uid, locked=True, ranking_only=ranking_only,
+                    )
                     challenge_id = flow.challenge_id if flow else None
                     flow_expires_at = (
                         flow.expires_at.timestamp() if flow and flow.expires_at else None
                     )
-                    if await session.scalar(
-                        select(Participant.id).where(
-                            Participant.giveaway_id == gid,
-                            Participant.user_id == uid,
+                    if ranking_only:
+                        flow_expires_at = (
+                            giveaway.deadline_at.timestamp() if giveaway.deadline_at
+                            else time.time() + 300
                         )
-                    ):
+                    elif await registered(session, gid, uid):
                         raise web.HTTPConflict(text="Ваше участие уже засчитано.")
-                    hard = await claim_hard_attempt(session, gid, uid, hard_key)
+                    if choose_mode:
+                        hard = requested == "hard"
+                        if hard:
+                            result = await claim_hard_game_slot(
+                                session, gid, uid, hard_key, reopening=reopening,
+                            )
+                            if result is None:
+                                raise web.HTTPConflict(text="Сложные попытки закончились.")
+                            hard_left = result
+                    else:
+                        hard = await claim_hard_attempt(session, gid, uid, hard_key)
                 if hard != (game["difficulty"] == "hard"):
                     game = await generator.generate(user, gid, "hard" if hard else "easy")
                 issued = time.time()
@@ -501,10 +601,19 @@ def register_game_routes(
                     challenge_id=challenge_id,
                     nonce=secrets.token_urlsafe(24),
                 )
-                if live:
+                if live or choose_mode:
                     assert flow_expires_at is not None
-                    game.update(live=True, connection=connection, flow_expires_at=flow_expires_at)
+                    game.update(flow_expires_at=flow_expires_at)
+                if live:
+                    game.update(live=True, connection=connection)
+                if choose_mode:
+                    game.update(hard_attempts_left=hard_left, ranking_only=ranking_only)
                 async with sessions.begin() as session:
+                    if switching and previous is not None:
+                        abandoned = previous | {"status": "abandoned"}
+                        await session.execute(update(AuditLog).where(
+                            AuditLog.id == previous["audit_id"], AuditLog.actor_user_id == uid,
+                        ).values(action="frog.run.finished", payload=payload(abandoned)))
                     record = AuditLog(
                         giveaway_id=gid,
                         actor_user_id=uid,
@@ -534,7 +643,7 @@ def register_game_routes(
             if bool(game.get("live")) != live or (live and game["connection"] != connection):
                 raise web.HTTPConflict(text="Партия открыта в другом окне. Откройте игру заново.")
             if not live:
-                game = await execute_command(game, data)
+                game = await execute_command(game, data, deadline=game.get("flow_expires_at"))
             elif game["status"] == "playing":
                 if action == "sync":
                     live_clock(game)
@@ -551,12 +660,20 @@ def register_game_routes(
         if game["status"] != "playing":
             await prepare_result(game)
             await persist(game, token)
-        if game["status"] == "won" and not live:
+        if game["status"] == "won" and not live and not game.get("ranking_only"):
             await finalize(game)
             await persist(game, token)
         public = snapshot(game, token)
         if live and game["status"] == "won":
             public["registration"] = await registration_status(game)
+        if choose_mode and game["status"] == "won":
+            if not live:
+                public["registration"] = "registered"
+            if (
+                game["difficulty"] == "hard" and public.get("registration") == "registered"
+                and game["giveaway_id"] != settings.frog_reopen_hard_giveaway_id
+            ):
+                public["hardAttemptsLeft"] = 0
         return public
 
     async def page(request: web.Request) -> web.Response:

@@ -52,19 +52,14 @@ jobs:
         run: uv run alembic upgrade head
       - name: Test
         run: uv run pytest
-      - name: Test wind animation
-        run: node --test frontend/wind.test.mjs frontend/beacon.test.mjs frontend/lasers.test.mjs frontend/game_runtime.test.mjs
-      - name: Build image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile.test
-          push: false
-          tags: tg-drop-bot:frog-ci
-      - name: Build production image without publishing
+      - name: Install frontend dependencies
+        run: npm ci --prefix frontend
+      - name: Test frontend
+        run: node --test frontend/*.test.mjs
+      - name: Build test image
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile
           push: false
-          tags: tg-drop-bot:free-game-ci
+          tags: tg-drop-bot-test:${{ github.sha }}

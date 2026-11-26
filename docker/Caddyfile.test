@@ -1,0 +1,19 @@
+{
+	auto_https off
+}
+
+{$WEBHOOK_URL} {
+	tls /certs/{$TEST_TLS_BASENAME}.crt /certs/{$TEST_TLS_BASENAME}.key
+	encode gzip
+
+	handle /healthz {
+		respond "ok" 200
+	}
+
+	@bot path /test/game/* /test/play/* /test/telegram/webhook
+	handle @bot {
+		reverse_proxy frog_bot:8080
+	}
+
+	respond 404
+}

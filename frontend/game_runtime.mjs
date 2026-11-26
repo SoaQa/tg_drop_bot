@@ -42,13 +42,19 @@ export function reconcileHop(animation,now,state){
  return {from:position,target:state.y,started:now,duration:90,confirmed:true};
 }
 
+export function vehiclePosition(lane,vehicle,elapsed){
+ const trackLength=lane.trackLength??9,count=lane.count??1;
+ const wrapped=(lane.phase+trackLength*vehicle/count+lane.speed*elapsed)%trackLength;
+ return (wrapped<0?wrapped+trackLength:wrapped)-1;
+}
+
 // A hint to ask the server for a fresh result, never a local loss or win.
 export function collisionHint(game,elapsed){
  for(const lane of game.lanes){
   if(lane.row!==game.y)continue;
   const count=lane.count??1;
   for(let vehicle=0;vehicle<count;vehicle++){
-   const car=((lane.phase+9*vehicle/count+lane.speed*elapsed)%9+9)%9-1;
+   const car=vehiclePosition(lane,vehicle,elapsed);
    if(Math.abs(car-game.x)<(lane.kind==='mower'?.65:.88))return true;
    if(laserState(lane,vehicle,elapsed)==='fire'){
     const direction=lane.speed>0?1:-1;

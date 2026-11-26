@@ -28,6 +28,8 @@ class Settings(BaseSettings):
     app_secret_key: str = Field(default="dev-change-me", alias="APP_SECRET_KEY")
     frog_game_enabled: bool = Field(default=False, alias="FROG_GAME_ENABLED")
     frog_live_transport_enabled: bool = Field(default=False, alias="FROG_LIVE_TRANSPORT_ENABLED")
+    frog_mode_selection_enabled: bool = Field(default=False, alias="FROG_MODE_SELECTION_ENABLED")
+    frog_reopen_hard_giveaway_id: int = Field(default=0, ge=0, alias="FROG_REOPEN_HARD_GIVEAWAY_ID")
     frog_game_path: Literal["/game", "/test/game"] = Field(
         default="/game", alias="FROG_GAME_PATH",
     )
@@ -75,10 +77,12 @@ class Settings(BaseSettings):
         return f"{self.webhook_url.rstrip('/')}{self.webhook_path}"
 
     def validate_runtime(self) -> None:
-        if self.frog_live_transport_enabled and (
+        if self.frog_reopen_hard_giveaway_id and not self.frog_mode_selection_enabled:
+            raise RuntimeError("Reopening hard attempts requires mode selection")
+        if (self.frog_live_transport_enabled or self.frog_mode_selection_enabled) and (
             not self.frog_game_enabled or not self.participation_queue_enabled
         ):
-            raise RuntimeError("Live frog transport requires the frog game and participation queue")
+            raise RuntimeError("Frog transport and mode selection require the game and queue")
         if self.free_game_enabled and (
             self.telegram_mode != "webhook" or not self.redis_url
             or self.app_secret_key == "dev-change-me"
